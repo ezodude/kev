@@ -17,10 +17,10 @@ require (
 	github.com/spf13/cobra v1.0.0
 	github.com/x-cray/logrus-prefixed-formatter v0.5.2
 	github.com/xeipuuv/gojsonschema v1.2.0
-	golang.org/x/sys v0.0.0-20200602225109-6fdc65e7d980 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20200605160147-a5ece683394c
+	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776
 	k8s.io/api v0.18.8
 	k8s.io/apimachinery v0.18.8
+	sigs.k8s.io/kind v0.9.0
 )
 
 replace (
