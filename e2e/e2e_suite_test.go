@@ -39,7 +39,7 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	kubeConfigPath = "./testdata/kubeConfigPath"
+	kubeConfigPath = "./testdata/kubeconfig"
 	clusterName = "kind"
 
 	provider, err = createCluster(clusterName, kubeConfigPath)
