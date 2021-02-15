@@ -51,8 +51,9 @@ import (
 
 // Kubernetes transformer
 type Kubernetes struct {
-	Opt     ConvertOptions // user provided options from the command line
-	Project *composego.Project
+	Opt      ConvertOptions     // user provided options from the command line
+	Project  *composego.Project // docker compose project
+	Excluded []string           // docker compose service names that should be excluded
 }
 
 // Transform converts compose project to set of k8s objects
@@ -79,6 +80,11 @@ func (k *Kubernetes) Transform() ([]runtime.Object, error) {
 
 	// @step iterate over sorted service definitions
 	for _, pSvc := range k.Project.Services {
+		// @step skip service if excluded
+		if contains(k.Excluded, pSvc.Name) {
+			continue
+		}
+
 		var objects []runtime.Object
 
 		projectService := ProjectService(pSvc)
@@ -830,7 +836,7 @@ func (k *Kubernetes) configPorts(projectService ProjectService) []v1.ContainerPo
 		protocol := strings.ToUpper(port.Protocol)
 
 		// @step skip port if already processed
-		if exist[string(port.Target)+protocol] {
+		if exist[fmt.Sprint(port.Target)+protocol] {
 			continue
 		}
 
@@ -840,7 +846,7 @@ func (k *Kubernetes) configPorts(projectService ProjectService) []v1.ContainerPo
 			HostIP:        port.HostIP,
 		})
 
-		exist[string(port.Target)+protocol] = true
+		exist[fmt.Sprint(port.Target)+protocol] = true
 	}
 
 	return ports
@@ -1116,17 +1122,19 @@ func (k *Kubernetes) configVolumes(projectService ProjectService) ([]v1.VolumeMo
 				"project-service": projectService.Name,
 			}, "Use configmap volume")
 
-			if cm, err := k.initConfigMapFromFileOrDir(projectService, volumeName, volume.Host); err != nil {
+			cm, err := k.initConfigMapFromFileOrDir(projectService, volumeName, volume.Host)
+			if err != nil {
 				log.Error("Couldn't create ConfigMap volume source")
 				return nil, nil, nil, nil, err
-			} else {
-				cms = append(cms, cm)
-				volsource = k.configConfigMapVolumeSource(volumeName, volume.Container, cm)
-
-				if useSubPathMount(cm) {
-					volMount.SubPath = volsource.ConfigMap.Items[0].Path
-				}
 			}
+
+			cms = append(cms, cm)
+			volsource = k.configConfigMapVolumeSource(volumeName, volume.Container, cm)
+
+			if useSubPathMount(cm) {
+				volMount.SubPath = volsource.ConfigMap.Items[0].Path
+			}
+
 		} else {
 			log.DebugWithFields(log.Fields{
 				"project-service": projectService.Name,
