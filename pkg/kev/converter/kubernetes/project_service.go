@@ -19,8 +19,6 @@ package kubernetes
 import (
 	"fmt"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/appvia/kev/pkg/kev/config"
@@ -34,116 +32,96 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// enabled returns Bool telling Kev whether app component is enabled/disabled
-func (p *ProjectService) enabled() bool {
-	if val, ok := p.Labels[config.LabelComponentEnabled]; ok {
-		if v, err := strconv.ParseBool(val); err == nil {
-			return v
-		}
-
-		log.WarnfWithFields(log.Fields{
-			"project-service": p.Name,
-			"enabled":         val,
-		}, "Unable to extract Bool value from %s label. Component will remain enabled.",
-			config.LabelComponentEnabled)
+func NewProjectService(svc composego.ServiceConfig) (ProjectService, error) {
+	cfg, err := config.SvcK8sConfigFromCompose(&svc)
+	if err != nil {
+		return ProjectService{}, err
 	}
 
-	return true
+	return ProjectService{
+		ServiceConfig: svc,
+		SvcK8sConfig:  cfg,
+	}, nil
+}
+
+// enabled returns Bool telling Kev whether app component is enabled/disabled
+func (p *ProjectService) enabled() bool {
+	return !p.SvcK8sConfig.Disabled
+}
+
+// command returns the workload command
+// When defined via config extension takes precedence over Entrypoint defined by the compose service spec.
+// Compose project service spec Entrypoint is equivalent to a k8s command,
+// see: https://github.com/kubernetes/kompose/blob/0036f0c32b37d0a521421b76e58b580b7574c127/docs/conversion.md
+func (p *ProjectService) command() []string {
+	var out []string
+
+	if len(p.Entrypoint) > 0 {
+		out = []string(p.Entrypoint)
+	}
+
+	if len(p.SvcK8sConfig.Workload.Command) > 0 {
+		out = p.SvcK8sConfig.Workload.Command
+	}
+
+	return out
+}
+
+// commandArgs returns the workload command arguments.
+// When defined via config extension takes precedence over Command defined by the compose service spec.
+// Compose project service spec Command is equivalent to k8s args,
+// see: https://github.com/kubernetes/kompose/blob/0036f0c32b37d0a521421b76e58b580b7574c127/docs/conversion.md
+func (p *ProjectService) commandArgs() []string {
+	var out []string
+
+	if len(p.Command) > 0 {
+		out = []string(p.Command)
+	}
+
+	if len(p.SvcK8sConfig.Workload.CommandArgs) > 0 {
+		out = p.SvcK8sConfig.Workload.CommandArgs
+	}
+
+	return out
+}
+
+// podAnnotations returns the workload pod annotations
+func (p *ProjectService) podAnnotations() map[string]string {
+	out := p.SvcK8sConfig.Workload.Annotations
+	if len(out) == 0 {
+		out = map[string]string{}
+	}
+	return out
 }
 
 // replicas returns number of replicas for given project service
 func (p *ProjectService) replicas() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadReplicas]; ok {
-		replicas, err := strconv.Atoi(val)
-		if err != nil {
-			log.WarnfWithFields(log.Fields{
-				"project-service": p.Name,
-				"replicas":        val,
-			}, "Unable to extract integer value from %s label. Defaulting to 1 replica.",
-				config.LabelWorkloadReplicas)
-
-			return config.DefaultReplicaNumber
-		}
-		return int32(replicas)
-	} else if p.Deploy != nil && p.Deploy.Replicas != nil {
-		return int32(*p.Deploy.Replicas)
-	}
-
-	return config.DefaultReplicaNumber
+	return int32(p.SvcK8sConfig.Workload.Replicas)
 }
 
 // autoscaleMaxReplicas returns maximum number of replicas for autoscaler
 func (p *ProjectService) autoscaleMaxReplicas() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadAutoscaleMaxReplicas]; ok {
-		maxReplicas, err := strconv.Atoi(val)
-		if err != nil {
-			log.WarnfWithFields(log.Fields{
-				"project-service":        p.Name,
-				"autoscale-max-replicas": val,
-			}, "Unable to extract integer value from %s label. Defaulting to %d replicas.",
-				config.LabelWorkloadAutoscaleMaxReplicas,
-				config.DefaultAutoscaleMaxReplicaNumber)
-
-			return int32(config.DefaultAutoscaleMaxReplicaNumber)
-		}
-		return int32(maxReplicas)
-	}
-
-	return int32(config.DefaultAutoscaleMaxReplicaNumber)
+	return int32(p.SvcK8sConfig.Workload.Autoscale.MaxReplicas)
 }
 
 // autoscaleTargetCPUUtilization returns target CPU utilization percentage for autoscaler
 func (p *ProjectService) autoscaleTargetCPUUtilization() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadAutoscaleCPUUtilizationThreshold]; ok {
-		cpu, err := strconv.Atoi(val)
-		if err != nil {
-			log.WarnfWithFields(log.Fields{
-				"project-service":         p.Name,
-				"autoscale-cpu-threshold": val,
-			}, "Unable to extract integer value from %s label. Defaulting to %d replicas.",
-				config.LabelWorkloadAutoscaleCPUUtilizationThreshold,
-				config.DefaultAutoscaleCPUThreshold)
-
-			return int32(config.DefaultAutoscaleCPUThreshold)
-		}
-		return int32(cpu)
-	}
-
-	return int32(config.DefaultAutoscaleCPUThreshold)
+	return int32(p.SvcK8sConfig.Workload.Autoscale.CPUThreshold)
 }
 
 // autoscaleTargetMemoryUtilization returns target memory utilization percentage for autoscaler
 func (p *ProjectService) autoscaleTargetMemoryUtilization() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadAutoscaleMemoryUtilizationThreshold]; ok {
-		mem, err := strconv.Atoi(val)
-		if err != nil {
-			log.WarnfWithFields(log.Fields{
-				"project-service":         p.Name,
-				"autoscale-mem-threshold": val,
-			}, "Unable to extract integer value from %s label. Defaulting to %d replicas.",
-				config.LabelWorkloadAutoscaleMemoryUtilizationThreshold,
-				config.DefaultAutoscaleMemoryThreshold)
-
-			return int32(config.DefaultAutoscaleMemoryThreshold)
-		}
-		return int32(mem)
-	}
-
-	return int32(config.DefaultAutoscaleMemoryThreshold)
+	return int32(p.SvcK8sConfig.Workload.Autoscale.MemoryThreshold)
 }
 
 // workloadType returns workload type for the project service
-func (p *ProjectService) workloadType() string {
-	workloadType := config.DefaultWorkload
+func (p *ProjectService) workloadType() config.WorkloadType {
+	workloadType := p.SvcK8sConfig.Workload.Type
 
-	if val, ok := p.Labels[config.LabelWorkloadType]; ok {
-		workloadType = val
-	}
-
-	if p.Deploy != nil && p.Deploy.Mode == "global" && !strings.EqualFold(workloadType, config.DaemonsetWorkload) {
+	if p.Deploy != nil && p.Deploy.Mode == "global" && !config.WorkloadTypesEqual(workloadType, config.DaemonSetWorkload) {
 		log.WarnfWithFields(log.Fields{
 			"project-service": p.Name,
-			"workload-type":   workloadType,
+			"workload-type":   workloadType.String(),
 		}, "Compose service defined as 'global' should map to K8s DaemonSet. Current configuration forces conversion to %s",
 			workloadType)
 	}
@@ -152,112 +130,118 @@ func (p *ProjectService) workloadType() string {
 }
 
 // serviceType returns service type for project service workload
-func (p *ProjectService) serviceType() (string, error) {
-	sType := config.DefaultService
-
-	if val, ok := p.Labels[config.LabelServiceType]; ok {
-		sType = val
-	} else if p.Deploy != nil && p.Deploy.EndpointMode == "vip" {
-		sType = config.NodePortService
-	}
-
-	serviceType, err := getServiceType(sType)
-	if err != nil {
-		log.ErrorWithFields(log.Fields{
-			"project-service": p.Name,
-			"service-type":    sType,
-		}, "Unrecognised k8s service type. Compose project service will not have k8s service generated.")
-
-		return "", fmt.Errorf("`%s` workload service type `%s` not supported", p.Name, sType)
-	}
+func (p *ProjectService) serviceType() (config.ServiceType, error) {
+	serviceType := p.SvcK8sConfig.Service.Type
 
 	// @step validate whether service type is set properly when node port is specified
-	if !strings.EqualFold(sType, string(v1.ServiceTypeNodePort)) && p.nodePort() != 0 {
-		log.ErrorfWithFields(log.Fields{
-			"project-service": p.Name,
-			"service-type":    sType,
-			"nodeport":        p.nodePort(),
-		}, "%s label value must be set as `NodePort` when assiging node port value", config.LabelServiceType)
-
-		return "", fmt.Errorf("`%s` workload service type must be set as `NodePort` when assiging node port value", p.Name)
+	if !strings.EqualFold(string(serviceType), string(v1.ServiceTypeNodePort)) && p.nodePort() != 0 {
+		return "", fmt.Errorf("`%s` workload service type must be set as `NodePort` when assigning node port value", p.Name)
 	}
 
 	if len(p.ports()) > 1 && p.nodePort() != 0 {
-		log.ErrorfWithFields(log.Fields{
-			"project-service": p.Name,
-		}, "Cannot set %s label value when service has multiple ports specified.", config.LabelServiceNodePortPort)
-
 		return "", fmt.Errorf("`%s` cannot set NodePort service port when project service has multiple ports defined", p.Name)
 	}
 
 	return serviceType, nil
 }
 
+// toV1ServiceType maps to a case-sensitive v1 service type
+func toV1ServiceType(st config.ServiceType) (v1.ServiceType, error) {
+	caseSensitiveSvcType, ok := config.ServiceTypeFromValue(st.String())
+	if !ok {
+		return "", errors.New("invalid service type")
+	}
+	return v1.ServiceType(caseSensitiveSvcType), nil
+}
+
 // nodePort returns the port for NodePort service type
 func (p *ProjectService) nodePort() int32 {
-	if val, ok := p.Labels[config.LabelServiceNodePortPort]; ok {
-		nodePort, _ := strconv.Atoi(val)
-		return int32(nodePort)
-	}
-
-	return 0
+	return int32(p.SvcK8sConfig.Service.NodePort)
 }
 
 // exposeService tells whether service for project component should be exposed
 func (p *ProjectService) exposeService() (string, error) {
-	if val, ok := p.Labels[config.LabelServiceExpose]; ok {
-		if val == "" && p.tlsSecretName() != "" {
-			log.ErrorfWithFields(log.Fields{
-				"project-service": p.Name,
-				"tls-secret-name": p.tlsSecretName(),
-			}, "TLS secret name specified via %s label but project service not exposed!",
-				config.LabelServiceExposeTLSSecret)
+	val := strings.TrimSpace(p.SvcK8sConfig.Service.Expose.Domain)
 
-			return "", fmt.Errorf("Service can't have TLS secret name when it hasn't been exposed")
-		}
-		return val, nil
+	if val == "" && p.tlsSecretName() != "" {
+		return "", fmt.Errorf("service can't have TLS secret name when it hasn't been exposed")
 	}
 
-	return "", nil
+	return val, nil
 }
 
 // tlsSecretName returns TLS secret name for exposed service (to be used in the ingress configuration)
 func (p *ProjectService) tlsSecretName() string {
-	if val, ok := p.Labels[config.LabelServiceExposeTLSSecret]; ok {
-		return val
-	}
+	return p.SvcK8sConfig.Service.Expose.TlsSecret
+}
 
-	return ""
+// ingressAnnotations returns the ingress annotations for exposed service (to be used in the ingress configuration)
+func (p *ProjectService) ingressAnnotations() map[string]string {
+	annotations := p.SvcK8sConfig.Service.Expose.IngressAnnotations
+	if len(annotations) == 0 {
+		annotations = map[string]string{}
+	}
+	return annotations
 }
 
 // getKubernetesUpdateStrategy gets update strategy for compose project service
 // Note: it only supports `parallelism` and `order`
-// @todo add label support for update strategy!
 func (p *ProjectService) getKubernetesUpdateStrategy() *v1apps.RollingUpdateDeployment {
+	// The update strategy should only rely on settings defined in a k8s extension. As the settings have
+	// already been inferred from the compose.go Deploy.UpdateConfig block.
+	//
+	// *****For now, as we can only configure settings for RollingUpdateMaxSurge, this is the only
+	// strategy that is enabled by default.*****
+	//
+	// If we are also to enable MaxUnavailable, we need an extra extension setting and a toggle
+	// to inform which setting to use.
+	//
+	// E.g. here's a yaml sample of the proposal:
+	// strategy:  # will cover Pod replacement / Statefulset update strategies perhaps
+	//  type: RollingUpdate
+	//  rollingUpdate: # there is no additional settings for `Replace` strategy currently.
+	//    maxUnavailable: 2
+	//    maxSurge: 2
+
+	// However, the above is applicable to Deployments and we also should rethink this in
+	// context of StatefulSet update strategies.
+
+	r := v1apps.RollingUpdateDeployment{}
+
+	if p.SvcK8sConfig.Workload.RollingUpdateMaxSurge > 0 {
+		maxSurge := intstr.FromInt(p.SvcK8sConfig.Workload.RollingUpdateMaxSurge)
+		r.MaxSurge = &maxSurge
+
+		maxUnavailable := intstr.FromString("25%")
+		r.MaxUnavailable = &maxUnavailable
+
+		return &r
+	}
+
+	// TODO(es): remove this when RollingUpdateMaxUnavailable is implemented as a k8s extension config param.
 	if p.Deploy == nil || p.Deploy.UpdateConfig == nil {
 		return nil
 	}
 
-	config := p.Deploy.UpdateConfig
-	r := v1apps.RollingUpdateDeployment{}
-
-	if config.Order == "stop-first" {
-		if config.Parallelism != nil {
-			maxUnavailable := intstr.FromInt(cast.ToInt(*config.Parallelism))
+	cfg := p.Deploy.UpdateConfig
+	if cfg.Order == "stop-first" {
+		if cfg.Parallelism != nil {
+			maxUnavailable := intstr.FromInt(cast.ToInt(*cfg.Parallelism))
 			r.MaxUnavailable = &maxUnavailable
 		}
 
-		maxSurge := intstr.FromInt(0)
+		maxSurge := intstr.FromString("25%")
 		r.MaxSurge = &maxSurge
 		return &r
 	}
 
-	if config.Order == "start-first" {
-		if config.Parallelism != nil {
-			maxSurge := intstr.FromInt(cast.ToInt(*config.Parallelism))
+	if cfg.Order == "start-first" {
+		if cfg.Parallelism != nil {
+			maxSurge := intstr.FromInt(cast.ToInt(*cfg.Parallelism))
 			r.MaxSurge = &maxSurge
 		}
-		maxUnavailable := intstr.FromInt(0)
+
+		maxUnavailable := intstr.FromString("25%")
 		r.MaxUnavailable = &maxUnavailable
 		return &r
 	}
@@ -275,30 +259,17 @@ func (p *ProjectService) volumes(project *composego.Project) ([]Volumes, error) 
 	}
 
 	for i, vol := range vols {
-		size, selector, storageClass := getVolumeLabels(project.Volumes[vol.VolumeName])
+		composeVol := volumeByNameAndFormat(vol.VolumeName, rfc1123, project.Volumes)
+		k8sVol, err := config.VolK8sConfigFromCompose(&composeVol)
+		if err != nil {
+			return nil, err
+		}
 
 		// We can't assign value to struct field in map while iterating over it, so temporary variable `temp` is used here
 		var temp = vols[i]
-
-		// set PVC size from label if present, or default size
-		if len(size) > 0 {
-			temp.PVCSize = size
-		} else {
-			temp.PVCSize = config.DefaultVolumeSize
-		}
-
-		// set PVC selector from label if present
-		if len(selector) > 0 {
-			temp.SelectorValue = selector
-		}
-
-		// set PVC storage class from label if present, or default class
-		if len(storageClass) > 0 {
-			temp.StorageClass = storageClass
-		} else {
-			temp.StorageClass = config.DefaultVolumeStorageClass
-		}
-
+		temp.PVCSize = k8sVol.Size
+		temp.SelectorValue = k8sVol.Selector
+		temp.StorageClass = k8sVol.StorageClass
 		vols[i] = temp
 	}
 
@@ -306,7 +277,7 @@ func (p *ProjectService) volumes(project *composego.Project) ([]Volumes, error) 
 }
 
 // placement returns information regarding pod affinity
-// @todo Add placement support via labels!
+// @todo Add placement support via an extension!
 func (p *ProjectService) placement() map[string]string {
 	if p.Deploy != nil && p.Deploy.Placement.Constraints != nil {
 		return loadPlacement(p.Deploy.Placement.Constraints)
@@ -316,14 +287,18 @@ func (p *ProjectService) placement() map[string]string {
 }
 
 // resourceRequests returns workload resource requests (memory & cpu)
-// It parses CPU & Memory as k8s resource.Quantity regardless
-// of how values are supplied (via deploy block or labels).
+// It parses CPU, Memory & Ephemeral Storage as k8s resource.Quantity regardless
+// of how values are supplied (via deploy block or an extension).
+// Note: Only CPU & Memory requests can be set via docker compose deploy block!
+//       Storage can only be set via extension parameter.
 // It supports resource notations:
 // - CPU: 0.1, 100m (which is the same as 0.1), 1
 // - Memory: 1, 1M, 1m, 1G, 1Gi
-func (p *ProjectService) resourceRequests() (*int64, *int64) {
+// - Storage: 128974848, 10M, 100Mi, 1G, 2Gi
+func (p *ProjectService) resourceRequests() (*int64, *int64, *int64) {
 	var memRequest int64
 	var cpuRequest int64
+	var storageRequest int64
 
 	// @step extract requests from deploy block if present
 	if p.Deploy != nil && p.Deploy.Resources.Reservations != nil {
@@ -332,154 +307,104 @@ func (p *ProjectService) resourceRequests() (*int64, *int64) {
 		cpuRequest = cpu.ToDec().MilliValue()
 	}
 
-	if val, ok := p.Labels[config.LabelWorkloadMemory]; ok {
+	if val := p.SvcK8sConfig.Workload.Resource.Memory; val != "" {
 		v, _ := resource.ParseQuantity(val)
 		memRequest, _ = v.AsInt64()
 	}
 
-	if val, ok := p.Labels[config.LabelWorkloadCPU]; ok {
+	if val := p.SvcK8sConfig.Workload.Resource.CPU; val != "" {
 		v, _ := resource.ParseQuantity(val)
 		cpuRequest = v.ToDec().MilliValue()
 	}
 
-	return &memRequest, &cpuRequest
+	if val := p.SvcK8sConfig.Workload.Resource.Storage; val != "" {
+		v, _ := resource.ParseQuantity(val)
+		storageRequest, _ = v.AsInt64()
+	}
+
+	return &memRequest, &cpuRequest, &storageRequest
 }
 
 // resourceLimits returns workload resource limits (memory & cpu)
-// It parses CPU & Memory as k8s resource.Quantity regardless
-// of how values are supplied (via deploy block or labels).
+// It parses CPU, Memory & Ephemeral Storage as k8s resource.Quantity regardless
+// of how values are supplied (via deploy block or an extension).
+// Note: Only CPU & Memory requests can be set via docker compose deploy block!
+//       Storage can only be set via extension parameter.
 // It supports resource notations:
 // - CPU: 0.1, 100m (which is the same as 0.1), 1
 // - Memory: 1, 1M, 1m, 1G, 1Gi
-func (p *ProjectService) resourceLimits() (*int64, *int64) {
+// - Storage: 128974848, 10M, 100Mi, 1G, 2Gi
+func (p *ProjectService) resourceLimits() (*int64, *int64, *int64) {
 	var memLimit int64
 	var cpuLimit int64
+	var storageLimit int64
 
 	// @step extract limits from deploy block if present
 	if p.Deploy != nil && p.Deploy.Resources.Limits != nil {
-		memLimit = int64(p.Deploy.Resources.Limits.MemoryBytes)
 		cpu, _ := resource.ParseQuantity(p.Deploy.Resources.Limits.NanoCPUs)
 		cpuLimit = cpu.ToDec().MilliValue()
 	}
 
-	if val, ok := p.Labels[config.LabelWorkloadMaxMemory]; ok {
+	if val := p.SvcK8sConfig.Workload.Resource.MaxMemory; val != "" {
 		v, _ := resource.ParseQuantity(val)
 		memLimit, _ = v.AsInt64()
 	}
 
-	if val, ok := p.Labels[config.LabelWorkloadMaxCPU]; ok {
+	if val := p.SvcK8sConfig.Workload.Resource.MaxCPU; val != "" {
 		v, _ := resource.ParseQuantity(val)
 		cpuLimit = v.ToDec().MilliValue()
 	}
 
-	return &memLimit, &cpuLimit
+	if val := p.SvcK8sConfig.Workload.Resource.MaxStorage; val != "" {
+		v, _ := resource.ParseQuantity(val)
+		storageLimit, _ = v.AsInt64()
+	}
+
+	return &memLimit, &cpuLimit, &storageLimit
 }
 
 // runAsUser returns pod security context runAsUser value
-func (p *ProjectService) runAsUser() string {
-	if val, ok := p.Labels[config.LabelWorkloadSecurityContextRunAsUser]; ok {
-		return val
-	}
-
-	return config.DefaultSecurityContextRunAsUser
+func (p *ProjectService) runAsUser() *int64 {
+	return p.SvcK8sConfig.Workload.PodSecurity.RunAsUser
 }
 
 // runAsGroup returns pod security context runAsGroup value
-func (p *ProjectService) runAsGroup() string {
-	if val, ok := p.Labels[config.LabelWorkloadSecurityContextRunAsGroup]; ok {
-		return val
-	}
-
-	return config.DefaultSecurityContextRunAsGroup
+func (p *ProjectService) runAsGroup() *int64 {
+	return p.SvcK8sConfig.Workload.PodSecurity.RunAsGroup
 }
 
 // fsGroup returns pod security context fsGroup value
-func (p *ProjectService) fsGroup() string {
-	if val, ok := p.Labels[config.LabelWorkloadSecurityContextFsGroup]; ok {
-		return val
-	}
-
-	return config.DefaultSecurityContextFsGroup
+func (p *ProjectService) fsGroup() *int64 {
+	return p.SvcK8sConfig.Workload.PodSecurity.FsGroup
 }
 
 // imagePullPolicy returns image PullPolicy for project service
 func (p *ProjectService) imagePullPolicy() v1.PullPolicy {
-	policy := config.DefaultImagePullPolicy
-
-	if val, ok := p.Labels[config.LabelWorkloadImagePullPolicy]; ok {
-		policy = val
-	}
-
-	pullPolicy, err := getImagePullPolicy(p.Name, policy)
-	if err != nil {
-		log.WarnfWithFields(log.Fields{
-			"project-service":   p.Name,
-			"image-pull-policy": policy,
-		}, "Invalid image pull policy passed in via %s label. Defaulting to `IfNotPresent`.",
-			config.LabelWorkloadImagePullPolicy)
-
-		return v1.PullPolicy(config.DefaultImagePullPolicy)
-	}
-
-	return pullPolicy
+	return v1.PullPolicy(p.SvcK8sConfig.Workload.ImagePull.Policy)
 }
 
 // imagePullSecret returns image pull secret (for private registries)
 func (p *ProjectService) imagePullSecret() string {
-	if val, ok := p.Labels[config.LabelWorkloadImagePullSecret]; ok {
-		return val
-	}
-
-	return config.DefaultImagePullSecret
+	return p.SvcK8sConfig.Workload.ImagePull.Secret
 }
 
 // serviceAccountName returns service account name to be used by the pod
 func (p *ProjectService) serviceAccountName() string {
-	if val, ok := p.Labels[config.LabelWorkloadServiceAccountName]; ok {
-		return val
-	}
-
-	return config.DefaultServiceAccountName
+	return p.SvcK8sConfig.Workload.ServiceAccountName
 }
 
-// restartPolicy return workload restart policy. Supports both docker-compose and Kubernetes notations.
-func (p *ProjectService) restartPolicy() v1.RestartPolicy {
-	policy := config.RestartPolicyAlways
+// restartPolicy returns workload restart policy
+func (p *ProjectService) restartPolicy() (v1.RestartPolicy, error) {
+	return toV1RestartPolicy(p.SvcK8sConfig.Workload.RestartPolicy)
+}
 
-	// @step restart policy defined on the compose service
-	if len(p.Restart) > 0 {
-		policy = p.Restart
+// toV1RestartPolicy maps to a case-sensitive v1 restart policy
+func toV1RestartPolicy(rp config.RestartPolicy) (v1.RestartPolicy, error) {
+	caseSensitivePolicy, ok := config.RestartPoliciesFromValue(rp.String())
+	if !ok {
+		return "", errors.New("invalid restart policy")
 	}
-
-	// @step restart policy defined in deploy block
-	if p.Deploy != nil && p.Deploy.RestartPolicy != nil {
-		policy = p.Deploy.RestartPolicy.Condition
-	}
-
-	if policy == "unless-stopped" {
-		log.WarnWithFields(log.Fields{
-			"project-service": p.Name,
-			"restart-policy":  policy,
-		}, "Restart policy 'unless-stopped' is not supported, converting it to 'always'")
-
-		policy = "always"
-	}
-
-	if val, ok := p.Labels[config.LabelWorkloadRestartPolicy]; ok {
-		policy = val
-	}
-
-	restartPolicy, err := getRestartPolicy(p.Name, policy)
-	if err != nil {
-		log.WarnWithFields(log.Fields{
-			"project-service": p.Name,
-			"restart-policy":  policy,
-		}, "Restart policy is not supported, defaulting to 'Always'")
-
-		return v1.RestartPolicy(config.RestartPolicyAlways)
-	}
-
-	return restartPolicy
+	return v1.RestartPolicy(caseSensitivePolicy), nil
 }
 
 // environment returns composego project service environment variables, and evaluates ENV from OS
@@ -512,7 +437,7 @@ func (p *ProjectService) environment() composego.MappingWithEquals {
 // ports returns combined list of ports from both project service `Ports` and `Expose`. Docker Expose ports are treated as TCP ports.
 // @orig: https://github.com/kubernetes/kompose/blob/e7f05588bf8bd645000612faa136b1b6aa0d5bb6/pkg/loader/compose/v3.go#L185
 func (p *ProjectService) ports() []composego.ServicePortConfig {
-	prts := []composego.ServicePortConfig{}
+	var prts []composego.ServicePortConfig
 	exist := map[string]bool{}
 
 	for _, port := range p.Ports {
@@ -550,267 +475,22 @@ func (p *ProjectService) ports() []composego.ServicePortConfig {
 	return prts
 }
 
-// healthcheck returns project service healthcheck probe
-func (p *ProjectService) healthcheck() (*v1.Probe, error) {
-
-	if !p.livenessProbeDisabled() {
-		command := p.livenessProbeCommand()
-		timoutSeconds := p.livenessProbeTimeout()
-		periodSeconds := p.livenessProbeInterval()
-		initialDelaySeconds := p.livenessProbeInitialDelay()
-		failureThreshold := p.livenessProbeRetries()
-
-		if len(command) == 0 || len(command[0]) == 0 || timoutSeconds == 0 || periodSeconds == 0 ||
-			initialDelaySeconds == 0 || failureThreshold == 0 {
-			log.Error("Health check misconfigured")
-			return nil, errors.New("Health check misconfigured")
-		}
-
-		probe := &v1.Probe{
-			Handler: v1.Handler{
-				Exec: &v1.ExecAction{
-					Command: command,
-				},
-			},
-			TimeoutSeconds:      timoutSeconds,
-			PeriodSeconds:       periodSeconds,
-			InitialDelaySeconds: initialDelaySeconds,
-			FailureThreshold:    failureThreshold,
-		}
-
-		return probe, nil
+func (p *ProjectService) LivenessProbe() (*v1.Probe, error) {
+	p1 := p.ServiceConfig
+	k8sconf, err := config.SvcK8sConfigFromCompose(&p1)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, nil
+	return LivenessProbeToV1Probe(k8sconf.Workload.LivenessProbe)
 }
 
-// livenessProbeCommand returns liveness probe command
-func (p *ProjectService) livenessProbeCommand() []string {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeCommand]; ok {
-		isList, _ := regexp.MatchString(`\[.*\]`, val)
-		if isList {
-			list := strings.Split(strings.ReplaceAll(strings.Trim(val, "[]"), "\"", ""), ", ")
-
-			switch list[0] {
-			case "NONE", "CMD", "CMD-SHELL":
-				return list[1:]
-			}
-
-			return list
-		}
-
-		return []string{val}
+func (p *ProjectService) ReadinessProbe() (*v1.Probe, error) {
+	p1 := p.ServiceConfig
+	k8sconf, err := config.SvcK8sConfigFromCompose(&p1)
+	if err != nil {
+		return nil, err
 	}
 
-	if p.HealthCheck != nil && len(p.HealthCheck.Test) > 0 {
-		// test must be either a string or a list. If it’s a list,
-		// the first item must be either NONE, CMD or CMD-SHELL.
-		// If it’s a string, it’s equivalent to specifying CMD-SHELL followed by that string.
-		// Removing the first element of HealthCheck.Test
-		return p.HealthCheck.Test[1:]
-	}
-
-	return []string{
-		config.DefaultLivenessProbeCommand,
-	}
-}
-
-// livenessProbeInterval returns liveness probe interval
-func (p *ProjectService) livenessProbeInterval() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeInterval]; ok {
-		i, _ := durationStrToSecondsInt(val)
-		return *i
-	}
-
-	if p.HealthCheck != nil && p.HealthCheck.Interval != nil {
-		i, _ := durationStrToSecondsInt(p.HealthCheck.Interval.String())
-		return *i
-	}
-
-	i, _ := durationStrToSecondsInt(config.DefaultProbeInterval)
-	return *i
-}
-
-// livenessProbeTimeout returns liveness probe timeout
-func (p *ProjectService) livenessProbeTimeout() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeTimeout]; ok {
-		to, _ := durationStrToSecondsInt(val)
-		return *to
-	}
-
-	if p.HealthCheck != nil && p.HealthCheck.Timeout != nil {
-		to, _ := durationStrToSecondsInt(p.HealthCheck.Timeout.String())
-		return *to
-	}
-
-	to, _ := durationStrToSecondsInt(config.DefaultProbeTimeout)
-	return *to
-}
-
-// livenessProbeInitialDelay returns liveness probe initial delay
-func (p *ProjectService) livenessProbeInitialDelay() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeInitialDelay]; ok {
-		d, _ := durationStrToSecondsInt(val)
-		return *d
-	}
-
-	if p.HealthCheck != nil && p.HealthCheck.StartPeriod != nil {
-		d, _ := durationStrToSecondsInt(p.HealthCheck.StartPeriod.String())
-		return *d
-	}
-
-	d, _ := durationStrToSecondsInt(config.DefaultProbeInitialDelay)
-	return *d
-}
-
-// livenessProbeRetries returns number of retries for the probe
-func (p *ProjectService) livenessProbeRetries() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeRetries]; ok {
-		r, _ := strconv.Atoi(val)
-		return int32(r)
-	}
-
-	if p.HealthCheck != nil && p.HealthCheck.Retries != nil {
-		return int32(*p.HealthCheck.Retries)
-	}
-
-	return int32(config.DefaultProbeRetries)
-}
-
-// livenessProbeDisabled tells whether liveness probe should be activated
-func (p *ProjectService) livenessProbeDisabled() bool {
-	if val, ok := p.Labels[config.LabelWorkloadLivenessProbeDisabled]; ok {
-		if v, err := strconv.ParseBool(val); err == nil {
-			return v
-		}
-
-		log.WarnfWithFields(log.Fields{
-			"project-service": p.Name,
-			"enabled":         val,
-		}, "Unable to extract Bool value from %s label. Liveness probe will be disabled.",
-			config.LabelWorkloadLivenessProbeDisabled)
-
-		return true
-	}
-
-	if p.HealthCheck != nil && p.HealthCheck.Disable == true {
-		return true
-	}
-
-	return false
-}
-
-// readinessProbe returns project service readiness probe
-func (p *ProjectService) readinessProbe() (*v1.Probe, error) {
-
-	if !p.readinessProbeDisabled() {
-		command := p.readinessProbeCommand()
-		timoutSeconds := p.readinessProbeTimeout()
-		periodSeconds := p.readinessProbeInterval()
-		initialDelaySeconds := p.readinessProbeInitialDelay()
-		failureThreshold := p.readinessProbeRetries()
-
-		if len(command) == 0 || len(command[0]) == 0 || timoutSeconds == 0 || periodSeconds == 0 ||
-			initialDelaySeconds == 0 || failureThreshold == 0 {
-			log.Error("Readiness probe misconfigured")
-			return nil, errors.New("Readiness probe misconfigured")
-		}
-
-		probe := &v1.Probe{
-			Handler: v1.Handler{
-				Exec: &v1.ExecAction{
-					Command: command,
-				},
-			},
-			TimeoutSeconds:      timoutSeconds,
-			PeriodSeconds:       periodSeconds,
-			InitialDelaySeconds: initialDelaySeconds,
-			FailureThreshold:    failureThreshold,
-		}
-
-		return probe, nil
-	}
-
-	return nil, nil
-}
-
-// readinessProbeCommand returns readiness probe command
-func (p *ProjectService) readinessProbeCommand() []string {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeCommand]; ok {
-		isList, _ := regexp.MatchString(`\[.*\]`, val)
-		if isList {
-			list := strings.Split(strings.ReplaceAll(strings.Trim(val, "[]"), "\"", ""), ", ")
-
-			switch list[0] {
-			case "NONE", "CMD", "CMD-SHELL":
-				return list[1:]
-			}
-
-			return list
-		}
-
-		return []string{val}
-	}
-
-	return []string{}
-}
-
-// readinessProbeInterval returns readiness probe interval
-func (p *ProjectService) readinessProbeInterval() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeInterval]; ok {
-		i, _ := durationStrToSecondsInt(val)
-		return *i
-	}
-
-	i, _ := durationStrToSecondsInt(config.DefaultProbeInterval)
-	return *i
-}
-
-// readinessProbeTimeout returns readiness probe timeout
-func (p *ProjectService) readinessProbeTimeout() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeTimeout]; ok {
-		to, _ := durationStrToSecondsInt(val)
-		return *to
-	}
-
-	to, _ := durationStrToSecondsInt(config.DefaultProbeTimeout)
-	return *to
-}
-
-// readinessProbeInitialDelay returns readiness probe initial delay
-func (p *ProjectService) readinessProbeInitialDelay() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeInitialDelay]; ok {
-		d, _ := durationStrToSecondsInt(val)
-		return *d
-	}
-
-	d, _ := durationStrToSecondsInt(config.DefaultProbeInitialDelay)
-	return *d
-}
-
-// readinessProbeRetries returns number of retries for the probe
-func (p *ProjectService) readinessProbeRetries() int32 {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeRetries]; ok {
-		r, _ := strconv.Atoi(val)
-		return int32(r)
-	}
-
-	return int32(config.DefaultProbeRetries)
-}
-
-// readinessProbeDisabled tells whether readiness probe should be activated
-func (p *ProjectService) readinessProbeDisabled() bool {
-	if val, ok := p.Labels[config.LabelWorkloadReadinessProbeDisabled]; ok {
-		if v, err := strconv.ParseBool(val); err == nil {
-			return v
-		}
-
-		log.WarnfWithFields(log.Fields{
-			"project-service": p.Name,
-			"enabled":         val,
-		}, "Unable to extract Bool value from %s label. Readiness probe will be disabled.",
-			config.LabelWorkloadReadinessProbeDisabled)
-	}
-
-	return true
+	return ReadinessProbeToV1Probe(k8sconf.Workload.ReadinessProbe)
 }

@@ -164,6 +164,14 @@ func (e *Environment) GetVolume(name string) (VolumeConfig, error) {
 	return e.override.getVolume(name)
 }
 
+// ToSources converts an environment to a sources object.
+func (e *Environment) ToSources() *Sources {
+	return &Sources{
+		Files:    []string{e.File},
+		override: e.override,
+	}
+}
+
 // WriteTo writes out an environment to a writer.
 // The Environment struct implements the io.WriterTo interface.
 func (e *Environment) WriteTo(w io.Writer) (n int64, err error) {
@@ -178,7 +186,7 @@ func (e *Environment) WriteTo(w io.Writer) (n int64, err error) {
 func (e *Environment) loadOverride() (*Environment, error) {
 	p, err := NewComposeProject([]string{e.File})
 	if err != nil {
-		return nil, err
+		return nil, errors.Errorf("%s\nsee compose file: %s", err.Error(), e.File)
 	}
 
 	var services Services
@@ -190,17 +198,17 @@ func (e *Environment) loadOverride() (*Environment, error) {
 		envVarsFromNilToBlankInService(s)
 		serviceConfig, err := newServiceConfig(s)
 		if err != nil {
-			return nil, errors.Wrapf(err, "Cannot load environment [%s], service [%s]", e.Name, name)
+			log.Debugf("cannot load environment [%s], service [%s]: err %s", e.Name, name, err.Error())
 		}
 		services = append(services, serviceConfig)
 	}
 	volumes := Volumes{}
-	for _, v := range p.VolumeNames() {
-		volumeConfig, err := newVolumeConfig(v, p)
+	for _, volName := range p.VolumeNames() {
+		volumeConfig, err := newVolumeConfig(volName, p)
 		if err != nil {
-			return nil, errors.Wrapf(err, "Cannot load environment [%s], volume [%s]", e.Name, v)
+			return nil, errors.Wrapf(err, "Cannot load environment [%s], volume [%s]", e.Name, volName)
 		}
-		volumes[v] = volumeConfig
+		volumes[volName] = volumeConfig
 	}
 	e.override = &composeOverride{
 		Version:  p.GetVersion(),
@@ -208,28 +216,6 @@ func (e *Environment) loadOverride() (*Environment, error) {
 		Volumes:  volumes,
 	}
 	return e, nil
-}
-
-func (e *Environment) reconcile(override *composeOverride) error {
-	log.DebugTitlef("Reconciling environment [%s]", e.Name)
-
-	labelsMatching := override.toLabelsMatching(e.override)
-	cset := labelsMatching.diff(e.override)
-	if cset.HasNoPatches() {
-		log.Debug("nothing to update")
-		return nil
-	}
-
-	e.patch(cset)
-	return nil
-}
-
-func (e *Environment) patch(cset changeset) {
-	e.override.patch(cset)
-}
-
-func (e *Environment) prepareForMergeUsing(override *composeOverride) {
-	e.override = e.override.expandLabelsFrom(override)
 }
 
 func (e *Environment) mergeInto(p *ComposeProject) error {

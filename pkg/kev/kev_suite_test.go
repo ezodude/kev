@@ -17,6 +17,10 @@
 package kev_test
 
 import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"testing"
 
 	. "github.com/onsi/ginkgo"
@@ -26,4 +30,39 @@ import (
 func TestKev(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Kev Suite")
+}
+
+func NewTempWorkingDir(composePath string) (tmpWd string, err error) {
+	data, err := ioutil.ReadFile(filepath.Join("testdata", composePath))
+	if err != nil {
+		return "", err
+	}
+
+	base, err := ioutil.TempDir("", "cmd-test")
+	if err != nil {
+		return "", err
+	}
+
+	wdWithComposePath := filepath.Join(base, composePath)
+	wd := filepath.Dir(wdWithComposePath)
+
+	if err := os.MkdirAll(wd, os.ModePerm); err != nil {
+		return "", err
+	}
+
+	copied, err := os.Create(wdWithComposePath)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err := copied.Close(); err != nil {
+			fmt.Printf("%s, while closing copied compose source\n", err)
+		}
+	}()
+
+	if _, err := copied.Write(data); err != nil {
+		return "", nil
+	}
+
+	return wd, nil
 }

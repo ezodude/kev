@@ -44,27 +44,37 @@ var _ = Describe("Skaffold", func() {
 	Describe("NewSkaffoldManifest", func() {
 		var (
 			skaffoldManifest *kev.SkaffoldManifest
-			err              error
 		)
 
 		JustBeforeEach(func() {
-			skaffoldManifest, err = kev.NewSkaffoldManifest([]string{}, &kev.ComposeProject{})
+			skaffoldManifest = kev.NewSkaffoldManifest([]string{}, &kev.ComposeProject{})
 		})
 
 		It("generates skaffold config for the project", func() {
 			Expect(skaffoldManifest).ToNot(BeNil())
-			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
 	Describe("BaseSkaffoldManifest", func() {
-		It("returns base skaffold", func() {
+		It("returns base skaffold with global pipeline build configuration", func() {
 			Expect(kev.BaseSkaffoldManifest()).To(Equal(
 				&kev.SkaffoldManifest{
 					APIVersion: latest.Version,
 					Kind:       "Config",
 					Metadata: latest.Metadata{
-						Name: "KevApp",
+						Name: "App",
+					},
+					Pipeline: latest.Pipeline{
+						Build: latest.BuildConfig{
+							BuildType: latest.BuildType{
+								LocalBuild: &latest.LocalBuild{},
+							},
+							TagPolicy: latest.TagPolicy{
+								GitTagger: &latest.GitTagger{
+									Variant: "Tags",
+								},
+							},
+						},
 					},
 				},
 			))
@@ -99,21 +109,8 @@ var _ = Describe("Skaffold", func() {
 			})
 
 			It("generates correct pipeline Build section for each environment", func() {
-				enabled := true
-
 				for _, p := range manifest.Profiles {
-					Expect(p.Build).To(Equal(latest.BuildConfig{
-						BuildType: latest.BuildType{
-							LocalBuild: &latest.LocalBuild{
-								Push: &enabled,
-							},
-						},
-						TagPolicy: latest.TagPolicy{
-							GitTagger: &latest.GitTagger{
-								Variant: "Tags",
-							},
-						},
-					}))
+					Expect(p.Build).To(Equal(latest.BuildConfig{}))
 				}
 			})
 
@@ -161,57 +158,21 @@ var _ = Describe("Skaffold", func() {
 
 	})
 
-	Describe("AdditionalProfiles", func() {
+	Describe("SetAdditionalProfiles", func() {
 
 		manifest := kev.BaseSkaffoldManifest()
-		manifest.AdditionalProfiles()
+		manifest.SetAdditionalProfiles()
 
 		It("adds all additional profiles", func() {
-			Expect(manifest.Profiles).To(HaveLen(4))
+			Expect(manifest.Profiles).To(HaveLen(2))
 		})
 
-		Context("minikube", func() {
-			It("adds additional profiles to the skaffold manifest with name containing kev defined prefix", func() {
-				Expect(manifest.Profiles).To(ContainElement(latest.Profile{
-					Name: "kev-minikube",
-					Activation: []latest.Activation{
-						{
-							KubeContext: "minikube",
-						},
-					},
-					Pipeline: latest.Pipeline{
-						Deploy: latest.DeployConfig{
-							KubeContext: "minikube",
-						},
-					},
-				}))
-			})
-		})
-
-		Context("docker-desktop", func() {
-			It("adds additional profiles to the skaffold manifest with name containing kev defined prefix", func() {
-				Expect(manifest.Profiles).To(ContainElement(latest.Profile{
-					Name: "kev-docker-desktop",
-					Activation: []latest.Activation{
-						{
-							KubeContext: "docker-desktop",
-						},
-					},
-					Pipeline: latest.Pipeline{
-						Deploy: latest.DeployConfig{
-							KubeContext: "docker-desktop",
-						},
-					},
-				}))
-			})
-		})
-
-		Context("ci-build-no-push", func() {
+		Context("ci-local-build-no-push", func() {
 			enabled := false
 
-			It("adds additional profiles to the skaffold manifest with name containing kev defined prefix", func() {
+			It("adds additional profiles to the skaffold manifest", func() {
 				Expect(manifest.Profiles).To(ContainElement(latest.Profile{
-					Name: "kev-ci-build-no-push",
+					Name: "ci-local-build-no-push",
 					Pipeline: latest.Pipeline{
 						Build: latest.BuildConfig{
 							BuildType: latest.BuildType{
@@ -225,12 +186,12 @@ var _ = Describe("Skaffold", func() {
 			})
 		})
 
-		Context("ci-build-and-push", func() {
+		Context("ci-local-build-and-push", func() {
 			enabled := true
 
-			It("adds additional profiles to the skaffold manifest with name containing kev defined prefix", func() {
+			It("adds additional profiles to the skaffold manifest", func() {
 				Expect(manifest.Profiles).To(ContainElement(latest.Profile{
-					Name: "kev-ci-build-and-push",
+					Name: "ci-local-build-and-push",
 					Pipeline: latest.Pipeline{
 						Build: latest.BuildConfig{
 							BuildType: latest.BuildType{
@@ -247,12 +208,12 @@ var _ = Describe("Skaffold", func() {
 		When("profile of the same name already exists in skaffold profiles", func() {
 
 			BeforeEach(func() {
-				// explicitly triggering another AdditionalProfiles
-				manifest.AdditionalProfiles()
+				// explicitly triggering another SetAdditionalProfiles
+				manifest.SetAdditionalProfiles()
 			})
 
 			It("doesn't add existing additional profiles again", func() {
-				Expect(manifest.Profiles).To(HaveLen(4))
+				Expect(manifest.Profiles).To(HaveLen(2))
 			})
 		})
 	})
@@ -310,7 +271,104 @@ var _ = Describe("Skaffold", func() {
 		})
 	})
 
-	Describe("AddProfiles", func() {
+	Describe("UpdateBuildArtifacts", func() {
+		var (
+			skaffoldManifest *kev.SkaffoldManifest
+			project          *kev.ComposeProject
+			analysis         *kev.Analysis
+			changed          bool
+		)
+
+		BeforeEach(func() {
+			analysis = &kev.Analysis{
+				Dockerfiles: []string{"src/svc1/Dockerfile"},
+				Images:      []string{"quay.io/myorg/svc1"},
+			}
+
+			project = &kev.ComposeProject{
+				Project: &composego.Project{
+					Services: composego.Services(
+						[]composego.ServiceConfig{
+							{
+								Name:  "svc2",
+								Image: "quay.io/myorg/svc2",
+								Build: &composego.BuildConfig{
+									Context: "src/svc2",
+								},
+							},
+						},
+					),
+				},
+			}
+
+			skaffoldManifest = &kev.SkaffoldManifest{}
+			skaffoldManifest.Build.Artifacts = []*latest.Artifact{
+				{
+					ImageName: "quay.io/myorg/svc1",
+					Workspace: "src/svc1",
+				},
+				{
+					ImageName: "quay.io/myorg/svc2",
+					Workspace: "src/svc2",
+				},
+			}
+		})
+
+		JustBeforeEach(func() {
+			changed = skaffoldManifest.UpdateBuildArtifacts(analysis, project)
+		})
+
+		When("list of detected build artefacts had not changed", func() {
+			It("doesn't update build artefacts in skaffold manifest", func() {
+				Expect(changed).To(BeFalse())
+				Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(2))
+
+				images := []string{}
+				for _, a := range skaffoldManifest.Build.Artifacts {
+					images = append(images, a.ImageName)
+				}
+				Expect(images).To(ContainElements("quay.io/myorg/svc1", "quay.io/myorg/svc2"))
+				Expect(images).ToNot(ContainElement("quay.io/myorg/svc99"))
+			})
+		})
+
+		When("list of detected build artefacts has changed", func() {
+			BeforeEach(func() {
+				project.Project.Services[0].Image = "quay.io/myorg/svc99"
+			})
+
+			It("updates build artefacts in skaffold manifest", func() {
+				Expect(changed).To(BeTrue())
+				Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(2))
+
+				images := []string{}
+				for _, a := range skaffoldManifest.Build.Artifacts {
+					images = append(images, a.ImageName)
+				}
+				Expect(images).To(ContainElements("quay.io/myorg/svc1", "quay.io/myorg/svc99"))
+				Expect(images).ToNot(ContainElement("quay.io/myorg/svc2"))
+			})
+		})
+
+		When("previous build artefacts were not defined (nil)", func() {
+			BeforeEach(func() {
+				skaffoldManifest.Build.Artifacts = nil
+			})
+
+			When("and current build artefacts were not detected (empty slice)", func() {
+				BeforeEach(func() {
+					analysis = nil
+					project.Services[0].Build = nil // reminder: images with no build context are excluded
+				})
+
+				It("returns false", func() {
+					Expect(changed).To(BeFalse())
+				})
+			})
+		})
+	})
+
+	Describe("InjectProfiles", func() {
 		var (
 			skaffoldManifest          *kev.SkaffoldManifest
 			existingSkaffoldPath      string
@@ -327,7 +385,7 @@ var _ = Describe("Skaffold", func() {
 			// Note, example skaffold already contains dev environment profile
 			BeforeEach(func() {
 				envs := []string{"prod"}
-				skaffoldManifest, err = kev.AddProfiles(existingSkaffoldPath, envs, includeAdditionalProfiles)
+				skaffoldManifest, err = kev.InjectProfiles(existingSkaffoldPath, envs, includeAdditionalProfiles)
 			})
 
 			It("adds that profile to skaffold manifest", func() {
@@ -342,7 +400,7 @@ var _ = Describe("Skaffold", func() {
 			// Note, example skaffold already contains dev environment profile
 			BeforeEach(func() {
 				envs := []string{"dev"}
-				skaffoldManifest, err = kev.AddProfiles(existingSkaffoldPath, envs, includeAdditionalProfiles)
+				skaffoldManifest, err = kev.InjectProfiles(existingSkaffoldPath, envs, includeAdditionalProfiles)
 			})
 
 			It("doesn't add it to the skaffold manifest", func() {
@@ -362,18 +420,17 @@ var _ = Describe("Skaffold", func() {
 			analysis         *kev.Analysis
 		)
 
+		BeforeEach(func() {
+			skaffoldManifest = &kev.SkaffoldManifest{}
+		})
+
+		JustBeforeEach(func() {
+			skaffoldManifest.SetBuildArtifacts(analysis, project)
+		})
+
 		Context("with detected service Dockerfiles", func() {
-
-			BeforeEach(func() {
-				skaffoldManifest = &kev.SkaffoldManifest{}
-			})
-
-			JustBeforeEach(func() {
-				skaffoldManifest.SetBuildArtifacts(analysis, project)
-			})
-
-			// Note, service name is derived from the Dockerfile location path
-			// example: src/myservice/Dockerfile will result in `myservice` service name
+			// Note, service image name is derived from the Dockerfile location path
+			// example: src/myservice/Dockerfile will result in `myservice` service image name
 
 			Context("and detected remote registry image names matching service name", func() {
 				BeforeEach(func() {
@@ -405,23 +462,46 @@ var _ = Describe("Skaffold", func() {
 					Expect(skaffoldManifest.Build.Artifacts[0].Workspace).To(Equal("src/myservice"))
 				})
 			})
-		})
 
-		When("skaffold analysis Images haven't been detected (due to missing k8s manifests)", func() {
-			BeforeEach(func() {
-				skaffoldManifest = &kev.SkaffoldManifest{}
-			})
-
-			JustBeforeEach(func() {
-				skaffoldManifest.SetBuildArtifacts(analysis, project)
-			})
-
-			Context("It falls back to Docker Compose source files for extraction of images and build contexts", func() {
+			When("Docker Compose defines image name with identical context", func() {
 				BeforeEach(func() {
 					analysis = &kev.Analysis{
-						Images: []string{},
+						Dockerfiles: []string{"src/myservice/Dockerfile"},
+						Images:      []string{},
+					}
+					project = &kev.ComposeProject{
+						Project: &composego.Project{
+							Services: composego.Services(
+								[]composego.ServiceConfig{
+									{
+										Name:  "svc1",
+										Image: "quay.io/myorg/svc1",
+										Build: &composego.BuildConfig{
+											Context: "src/myservice",
+										},
+									},
+								},
+							),
+						},
 					}
 				})
+
+				It("overrides Skaffold detected build artifact image name with Docker Compose extracted one", func() {
+					Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
+					Expect(skaffoldManifest.Build.Artifacts[0].ImageName).To(Equal("quay.io/myorg/svc1"))
+					Expect(skaffoldManifest.Build.Artifacts[0].Workspace).To(Equal("src/myservice"))
+				})
+			})
+		})
+
+		Context("with or without images detected by Skaffold analysis", func() {
+			BeforeEach(func() {
+				analysis = &kev.Analysis{
+					Images: []string{}, // this can be either empty slice or a list of images
+				}
+			})
+
+			Context("fallback to Docker Compose source files for extraction of images and build contexts", func() {
 
 				When("Docker Compose project has services referencing images with build contexts", func() {
 					image := "quay.io/org/myimage:latest"
@@ -445,14 +525,80 @@ var _ = Describe("Skaffold", func() {
 						}
 					})
 
-					It("generates skaffold build artefacts with extracted Docker Compose images and their respective contexts", func() {
-						Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
-						Expect(skaffoldManifest.Build.Artifacts[0].ImageName).To(Equal(image))
-						Expect(skaffoldManifest.Build.Artifacts[0].Workspace).To(Equal(context))
+					Context("and Dockerfiles detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{"src/myservice/Dockerfile"}
+						})
+
+						It("generates skaffold build artefacts with extracted Docker Compose images and their respective contexts", func() {
+							// Note: there are two build artifacts: 1) from Skaffold analysis, 2) from Docker Compose
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(2))
+							Expect(skaffoldManifest.Build.Artifacts).To(ContainElements(
+								&latest.Artifact{
+									ImageName: "myservice",
+									Workspace: "src/myservice",
+								},
+								&latest.Artifact{
+									ImageName: image,
+									Workspace: context,
+								},
+							))
+						})
+
+						It("uses default `docker` build strategy for artifact", func() {
+							// ensure artifact type is not set to `buildpack`
+							Expect(skaffoldManifest.Build.Artifacts[0].ArtifactType.BuildpackArtifact).To(BeNil())
+							Expect(skaffoldManifest.Build.Artifacts[1].ArtifactType.BuildpackArtifact).To(BeNil())
+						})
 					})
+
+					Context("and Dockerfiles NOT detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{}
+						})
+
+						It("generates skaffold build artefacts with extracted Docker Compose images and their respective contexts", func() {
+							// Note: there is one build artifact: 1) from Docker Compose (no Skaffold analysis dockefiles detected!)
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
+							Expect(skaffoldManifest.Build.Artifacts[0].ImageName).To(Equal(image))
+							Expect(skaffoldManifest.Build.Artifacts[0].Workspace).To(Equal(context))
+						})
+
+						It("uses `buildpack` build strategy for artifact as Skaffold analysis didn't detect any Dockerfiles", func() {
+							// ensure artifact type is set to `buildpack`
+							Expect(skaffoldManifest.Build.Artifacts[0].ArtifactType).To(Equal(latest.ArtifactType{
+								BuildpackArtifact: &latest.BuildpackArtifact{
+									Builder: "paketobuildpacks/builder:base",
+								},
+							}))
+						})
+					})
+
+					Context("with nil analysis", func() {
+						BeforeEach(func() {
+							analysis = nil
+						})
+
+						It("generates skaffold build artefacts with extracted Docker Compose images and their respective contexts", func() {
+							// Note: there is one build artifact: 1) from Docker Compose (no Skaffold analysis dockefiles detected!)
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
+							Expect(skaffoldManifest.Build.Artifacts[0].ImageName).To(Equal(image))
+							Expect(skaffoldManifest.Build.Artifacts[0].Workspace).To(Equal(context))
+						})
+
+						It("uses `buildpack` build strategy for artifact as Skaffold analysis didn't detect any Dockerfiles", func() {
+							// ensure artifact type is set to `buildpack`
+							Expect(skaffoldManifest.Build.Artifacts[0].ArtifactType).To(Equal(latest.ArtifactType{
+								BuildpackArtifact: &latest.BuildpackArtifact{
+									Builder: "paketobuildpacks/builder:base",
+								},
+							}))
+						})
+					})
+
 				})
 
-				When("Docker Compose project doens't have services referencing images with build contexts", func() {
+				When("Docker Compose project doesn't have services referencing images with build contexts", func() {
 					image := "quay.io/org/myimage:latest"
 
 					BeforeEach(func() {
@@ -470,12 +616,42 @@ var _ = Describe("Skaffold", func() {
 						}
 					})
 
-					It("skips Docker Compose images without build context defined", func() {
-						Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+					Context("and Dockerfiles detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{"src/myservice/Dockerfile"}
+						})
+
+						It("skips Docker Compose images without build context defined", func() {
+							// NOTE: Skaffold analysis detected Dockerfile so there will be only one build artifact
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
+						})
+					})
+
+					Context("and Dockerfiles NOT detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{}
+						})
+
+						It("skips Docker Compose images without build context defined", func() {
+							// NOTE: Skaffold analysis didn't detect Dockerfile and Docker Compose service didn't have build.context
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+						})
+
+					})
+
+					Context("with nil analysis", func() {
+						BeforeEach(func() {
+							analysis = nil
+						})
+
+						It("skips Docker Compose images without build context defined", func() {
+							// NOTE: Skaffold analysis didn't detect Dockerfile and Docker Compose service didn't have build.context
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+						})
 					})
 				})
 
-				When("Docker Compose project doens't have services", func() {
+				When("Docker Compose project doesn't have any services", func() {
 					BeforeEach(func() {
 						project = &kev.ComposeProject{
 							Project: &composego.Project{
@@ -484,8 +660,37 @@ var _ = Describe("Skaffold", func() {
 						}
 					})
 
-					It("doesn't add skaffold build artefacts for project without services specified", func() {
-						Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+					Context("and Dockerfiles detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{"src/myservice/Dockerfile"}
+						})
+
+						It("doesn't add additional build artefacts", func() {
+							// NOTE: Skaffold analysis detected Dockerfile so there will be only one build artifact
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(1))
+						})
+					})
+
+					Context("and Dockerfiles NOT detected by Skaffold analysis", func() {
+						BeforeEach(func() {
+							analysis.Dockerfiles = []string{}
+						})
+
+						It("doesn't add additional build artefacts", func() {
+							// NOTE: Skaffold analysis didn't detect Dockerfile and Docker Compose doesn't have services
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+						})
+					})
+
+					Context("with nil analysis", func() {
+						BeforeEach(func() {
+							analysis = nil
+						})
+
+						It("doesn't add additional build artefacts", func() {
+							// NOTE: Skaffold analysis didn't detect Dockerfile and Docker Compose doesn't have services
+							Expect(skaffoldManifest.Build.Artifacts).To(HaveLen(0))
+						})
 					})
 				})
 			})

@@ -21,38 +21,46 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/appvia/kev/pkg/kev/config"
 	"github.com/appvia/kev/pkg/kev/converter"
 	"github.com/appvia/kev/pkg/kev/log"
+	kmd "github.com/appvia/komando"
 	composego "github.com/compose-spec/compose-go/types"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
 )
 
+// Infix component of generated environment override filenames
+// (e.g. results in docker-compose.env.dev.yaml)
+const envOverrideFileInfix = "env"
+
 // NewManifest returns a new Manifest struct.
-func NewManifest(files []string, workingDir string) (*Manifest, error) {
-	s, err := newSources(files, workingDir)
-	if err != nil {
-		return nil, err
-	}
+func NewManifest(sources *Sources) *Manifest {
 	return &Manifest{
 		Id:      uuid.New().String(),
-		Sources: s,
-	}, nil
+		Sources: sources,
+	}
 }
 
 // LoadManifest returns application manifests.
 func LoadManifest(workingDir string) (*Manifest, error) {
-	data, err := ioutil.ReadFile(path.Join(workingDir, ManifestName))
+	data, err := ioutil.ReadFile(filepath.Join(workingDir, ManifestFilename))
 	if err != nil {
 		return nil, err
 	}
+
 	var m *Manifest
-	return m, yaml.Unmarshal(data, &m)
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+
+	m.UI = kmd.NoOpUI()
+
+	return m, nil
 }
 
 // WriteTo writes out a manifest to a writer.
@@ -114,25 +122,45 @@ func (m *Manifest) CalculateSourcesBaseOverride(opts ...BaseOverrideOpts) (*Mani
 	return m, nil
 }
 
-// MintEnvironments create new environments based on candidate environments and manifest base labels.
+// MintEnvironments create new environments based on candidate environments.
 // This includes an implicit sandbox environment that will always be created.
-func (m *Manifest) MintEnvironments(candidates []string) *Manifest {
+func (m *Manifest) MintEnvironments(candidates []string) error {
+	m.UI.Header("Creating deployment environments...")
+	sg := m.UI.StepGroup()
+	defer sg.Done()
+
 	fileNameTemplate := m.GetEnvironmentFileNameTemplate()
 
 	m.Environments = Environments{}
 	if !contains(candidates, SandboxEnv) {
-		candidates = append(candidates, SandboxEnv)
+		candidates = append([]string{SandboxEnv}, candidates...)
 	}
 
-	override := m.getSourcesOverride().toBaseLabels()
-	for _, env := range candidates {
-		m.Environments = append(m.Environments, &Environment{
-			Name:     env,
-			override: override,
-			File:     path.Join(m.getWorkingDir(), fmt.Sprintf(fileNameTemplate, env)),
-		})
+	overrideTemplate := m.getSourcesOverride()
+	if err := minifyK8sExtensionsToBaseAttributes(overrideTemplate); err != nil {
+		return err
 	}
-	return m
+
+	for _, env := range candidates {
+		envFilename := filepath.Join(m.getWorkingDir(), fmt.Sprintf(fileNameTemplate, envOverrideFileInfix, env))
+		var step kmd.Step
+		if env == SandboxEnv {
+			step = sg.Add(fmt.Sprintf("Creating the %s sandbox env file: %s", SandboxEnv, envFilename))
+		} else {
+			step = sg.Add(fmt.Sprintf("Creating the %s env file: %s", env, envFilename))
+		}
+
+		candidate := &Environment{
+			Name:     env,
+			override: overrideTemplate,
+			File:     envFilename,
+		}
+
+		m.Environments = append(m.Environments, candidate)
+		step.Success()
+	}
+
+	return nil
 }
 
 // GetEnvironmentFileNameTemplate returns environment file name template to match
@@ -141,17 +169,43 @@ func (m *Manifest) GetEnvironmentFileNameTemplate() string {
 	firstSrc := filepath.Base(m.Sources.Files[0])
 	parts := strings.Split(firstSrc, ".")
 	ext := parts[len(parts)-1]
-	return strings.ReplaceAll(firstSrc, ext, "kev.%s."+ext)
+	return strings.ReplaceAll(firstSrc, ext, "%s.%s."+ext)
 }
 
 // ReconcileConfig reconciles config changes with docker-compose sources against deployment environments.
-func (m *Manifest) ReconcileConfig() (*Manifest, error) {
+func (m *Manifest) ReconcileConfig(envs ...string) (*Manifest, error) {
 	if _, err := m.CalculateSourcesBaseOverride(withEnvVars); err != nil {
+		sg := m.UI.StepGroup()
+		defer sg.Done()
+		renderStepError(m.UI, sg.Add(""), renderStepReconcileDetect, err)
 		return nil, err
 	}
+
 	sourcesOverride := m.getSourcesOverride()
-	for _, e := range m.Environments {
-		if err := e.reconcile(sourcesOverride); err != nil {
+	filteredEnvs, err := m.GetEnvironments(envs)
+	if err != nil {
+		sg := m.UI.StepGroup()
+		defer sg.Done()
+		renderStepError(m.UI, sg.Add(""), renderStepReconcileDetect, err)
+		return nil, err
+	}
+
+	for _, e := range filteredEnvs {
+		if err := validateEnvExtensions(e, sourcesOverride); err != nil {
+			sg := m.UI.StepGroup()
+			renderStepError(m.UI, sg.Add(""), renderStepReconcileDetect, err)
+			sg.Done()
+			return nil, err
+		}
+
+		log.Debugf("Reconciling environment [%s]", e.Name)
+
+		m.UI.Output(fmt.Sprintf("%s: %s", e.Name, e.File))
+
+		if err := sourcesOverride.diffAndPatch(e.override); err != nil {
+			sg := m.UI.StepGroup()
+			renderStepError(m.UI, sg.Add(""), renderStepReconcileApply, err)
+			sg.Done()
 			return nil, err
 		}
 	}
@@ -159,11 +213,64 @@ func (m *Manifest) ReconcileConfig() (*Manifest, error) {
 	return m, nil
 }
 
+func validateEnvExtensions(e *Environment, base *composeOverride) error {
+	for _, s := range e.GetServices() {
+		baseSvc, missingSvcErr := base.getService(s.Name)
+		if missingSvcErr != nil {
+			continue
+		}
+
+		baseSvcK8sCfg, err := config.ParseSvcK8sConfigFromMap(baseSvc.Extensions, config.SkipValidation())
+		if err != nil {
+			return errors.Wrapf(missingSvcErr, "when parsing service %s extensions in base compose file", baseSvc.Name)
+		}
+
+		envSvcK8sCfg, err := config.ParseSvcK8sConfigFromMap(s.Extensions, config.SkipValidation())
+		if err != nil {
+			return errors.Wrapf(missingSvcErr, "when parsing service %s extensions", s.Name)
+		}
+
+		mergedK8sSvcCfg, err := baseSvcK8sCfg.Merge(envSvcK8sCfg)
+		if err != nil {
+			return missingSvcErr
+		}
+
+		if err := mergedK8sSvcCfg.Validate(); err != nil {
+			return err
+		}
+	}
+
+	for name, vol := range e.GetVolumes() {
+		baseVol, missingVolError := base.getVolume(name)
+		if missingVolError != nil {
+			continue
+		}
+
+		baseVolK8sCfg, err := config.ParseVolK8sConfigFromMap(baseVol.Extensions)
+		if err != nil {
+			return errors.Wrapf(missingVolError, "when parsing vol %s extensions in base compose file", name)
+		}
+
+		envVolK8sCfg, err := config.ParseVolK8sConfigFromMap(vol.Extensions)
+		if err != nil {
+			return errors.Wrapf(missingVolError, "when parsing vol %s extensions", name)
+		}
+
+		mergedVolK8sCfg, err := baseVolK8sCfg.Merge(envVolK8sCfg)
+		if err != nil {
+			return missingVolError
+		}
+
+		if err := mergedVolK8sCfg.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // MergeEnvIntoSources merges an environment into a parsed instance of the tracked docker-compose sources.
 // It returns the merged ComposeProject.
 func (m *Manifest) MergeEnvIntoSources(e *Environment) (*ComposeProject, error) {
-	e.prepareForMergeUsing(m.getSourcesOverride())
-
 	p, err := m.SourcesToComposeProject()
 	if err != nil {
 		return nil, err
@@ -175,16 +282,18 @@ func (m *Manifest) MergeEnvIntoSources(e *Environment) (*ComposeProject, error) 
 }
 
 // RenderWithConvertor renders K8s manifests with specific converter
-func (m *Manifest) RenderWithConvertor(c converter.Converter, outputDir string, singleFile bool, envs []string, excluded map[string][]string) (
-	*Manifest,
-	error,
-) {
+func (m *Manifest) RenderWithConvertor(c converter.Converter, outputDir string, singleFile bool, envs []string, excluded map[string][]string) (map[string]string, error) {
+	errSg := m.UI.StepGroup()
+	defer errSg.Done()
+
 	if _, err := m.CalculateSourcesBaseOverride(); err != nil {
+		renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, err)
 		return nil, err
 	}
 
 	filteredEnvs, err := m.GetEnvironments(envs)
 	if err != nil {
+		renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, err)
 		return nil, err
 	}
 
@@ -196,7 +305,9 @@ func (m *Manifest) RenderWithConvertor(c converter.Converter, outputDir string, 
 	for _, env := range filteredEnvs {
 		p, err := m.MergeEnvIntoSources(env)
 		if err != nil {
-			return nil, errors.Wrap(err, "Couldn't calculate compose project representation")
+			wrappedErr := errors.Wrapf(err, "environment %s, details:\n", env.Name)
+			renderStepError(m.UI, errSg.Add(""), renderStepRenderOverlay, wrappedErr)
+			return nil, wrappedErr
 		}
 		projects[env.Name] = p.Project
 		files[env.Name] = append(sourcesFiles, env.File)
@@ -204,76 +315,39 @@ func (m *Manifest) RenderWithConvertor(c converter.Converter, outputDir string, 
 
 	outputPaths, err := c.Render(singleFile, outputDir, m.getWorkingDir(), projects, files, rendered, excluded)
 	if err != nil {
-		log.Errorf("Couldn't render manifests")
+		renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, err)
 		return nil, err
 	}
 
 	if len(m.Skaffold) > 0 {
+		// Update skaffold profiles upon render - this ensures profiles stay up to date
 		if err := UpdateSkaffoldProfiles(m.Skaffold, outputPaths); err != nil {
-			log.Errorf("Couldn't update skaffold.yaml profiles")
+			decoratedErr := errors.Errorf("Couldn't update skaffold.yaml profiles, details:\n%s", err)
+			renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, decoratedErr)
+			return nil, err
+		}
+
+		// Update skaffold build artifacts - these may change over time, usually by manual update in base docker compose
+		composeProject, err := m.SourcesToComposeProject()
+		if err != nil {
+			decoratedErr := errors.Errorf("Couldn't build Docker Compose Project from tracked source files, details:\n%s", err)
+			renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, decoratedErr)
+			return nil, err
+		}
+
+		if err = UpdateSkaffoldBuildArtifacts(m.Skaffold, composeProject); err != nil {
+			decoratedErr := errors.Errorf("Couldn't update skaffold.yaml build artifacts, details:\n%s", err)
+			renderStepError(m.UI, errSg.Add(""), renderStepRenderGeneral, decoratedErr)
 			return nil, err
 		}
 	}
-	return m, nil
-}
 
-// DetectSecretsInSources detects any potential secrets setup as environment variables in a manifests sources.
-func (m *Manifest) DetectSecretsInSources(matchers []map[string]string) error {
-	sourcesFiles := m.GetSourcesFiles()
-	p, err := NewComposeProject(sourcesFiles)
-	if err != nil {
-		return err
-	}
-
-	candidates := Services{}
-	for _, s := range p.Services {
-		candidates = append(candidates, ServiceConfig{Name: s.Name, Environment: s.Environment})
-	}
-
-	detected := candidates.detectSecrets(matchers, func() {
-		log.Warnf("Detected potential secrets in sources %s", sourcesFiles)
-	})
-
-	if !detected {
-		log.Debug("No secrets detected in project sources")
-	}
-
-	return nil
-}
-
-// DetectSecretsInEnvs detects any potential secrets setup as environment variables
-// in a manifests deployment environments config.
-func (m *Manifest) DetectSecretsInEnvs(matchers []map[string]string) error {
-	var filter []string
-	envs, err := m.GetEnvironments(filter)
-	if err != nil {
-		return err
-	}
-
-	for _, env := range envs {
-		detected := env.GetServices().detectSecrets(matchers, func() {
-			log.Warnf("Detected potential secrets in env [%s]", env.Name)
-		})
-		if !detected {
-			log.Debugf("No secrets detected in env [%s]", env.Name)
-		}
-	}
-	return nil
+	return outputPaths, nil
 }
 
 // GetSourcesFiles gets the sources tracked docker-compose files.
 func (m *Manifest) GetSourcesFiles() []string {
 	return m.Sources.Files
-}
-
-// getWorkingDir gets the sources working directory.
-func (m *Manifest) getWorkingDir() string {
-	return m.Sources.getWorkingDir()
-}
-
-// getSourcesOverride gets the sources calculated override.
-func (m *Manifest) getSourcesOverride() *composeOverride {
-	return m.Sources.override
 }
 
 // SourcesToComposeProject returns the manifests compose sources as a ComposeProject.
@@ -286,11 +360,36 @@ func ManifestExistsForPath(manifestPath string) bool {
 	return err == nil
 }
 
-func EnsureFirstInit(wd string) error {
-	manifestPath := path.Join(wd, ManifestName)
-	if ManifestExistsForPath(manifestPath) {
-		err := fmt.Errorf("%s already exists at: %s", ManifestName, manifestPath)
-		return err
+// getWorkingDir gets the sources working directory.
+func (m *Manifest) getWorkingDir() string {
+	return m.Sources.getWorkingDir()
+}
+
+// getSourcesOverride gets the sources calculated override.
+func (m *Manifest) getSourcesOverride() *composeOverride {
+	override := m.Sources.override
+	override.UI = m.UI
+	return override
+}
+
+// minifyK8sExtensionsToBaseAttributes removes all attributes except a selected few deemed
+// most useful for users to configure immediately.
+func minifyK8sExtensionsToBaseAttributes(override *composeOverride) error {
+	for _, svc := range override.Services {
+		minifiedSvcExt, err := config.MinifySvcK8sExtension(svc.Extensions)
+		if err != nil {
+			return err
+		}
+		svc.Extensions[config.K8SExtensionKey] = minifiedSvcExt
 	}
+
+	for _, vol := range override.Volumes {
+		minifiedVolExt, err := config.MinifyVolK8sExtension(vol.Extensions)
+		if err != nil {
+			return err
+		}
+		vol.Extensions[config.K8SExtensionKey] = minifiedVolExt
+	}
+
 	return nil
 }

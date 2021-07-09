@@ -18,6 +18,7 @@ package kev_test
 
 import (
 	"github.com/appvia/kev/pkg/kev"
+	"github.com/appvia/kev/pkg/kev/config"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -29,9 +30,9 @@ var _ = Describe("Manifest", func() {
 		source, _ := kev.NewComposeProject([]string{workingDir + "/docker-compose.yaml"})
 
 		Context("pre merge", func() {
-			It("confirms there are no service labels", func() {
+			It("confirms there is a single service extension", func() {
 				sourceSvc, _ := source.GetService("db")
-				Expect(sourceSvc.Labels).To(HaveLen(0))
+				Expect(sourceSvc.Extensions["x-an-extension"]).ToNot(BeNil())
 			})
 
 			It("confirms env var overrides", func() {
@@ -41,9 +42,9 @@ var _ = Describe("Manifest", func() {
 				Expect(sourceSvc.Environment["OVERRIDE_ME_WITH_VAL"]).To(Equal(&overrideMeWithVal))
 			})
 
-			It("confirms there are no volume labels", func() {
-				sourceVol, _ := source.Volumes["db_data"]
-				Expect(sourceVol.Labels).To(HaveLen(0))
+			It("confirms there are no volume extensions", func() {
+				sourceVol := source.Volumes["db_data"]
+				Expect(sourceVol.Extensions).To(HaveLen(0))
 			})
 		})
 
@@ -52,30 +53,39 @@ var _ = Describe("Manifest", func() {
 				merged   *kev.ComposeProject
 				mergeErr error
 				env      *kev.Environment
+				manifest *kev.Manifest
 			)
 
-			manifest, err := kev.LoadManifest(workingDir)
-			if err == nil {
-				_, _ = manifest.CalculateSourcesBaseOverride()
-				env, _ = manifest.GetEnvironment("dev")
-				merged, mergeErr = manifest.MergeEnvIntoSources(env)
-			}
+			BeforeEach(func() {
+				var err error
+				manifest, err = kev.LoadManifest(workingDir)
+				Expect(err).NotTo(HaveOccurred())
 
-			It("merged the environment labels into sources", func() {
-				mergedSvc, _ := merged.GetService("db")
-				envSvc, _ := env.GetService("db")
-				Expect(mergedSvc.Labels).To(Equal(envSvc.Labels))
+				_, err = manifest.CalculateSourcesBaseOverride()
+				Expect(err).NotTo(HaveOccurred())
+
+				env, err = manifest.GetEnvironment("dev")
+				Expect(err).NotTo(HaveOccurred())
+
+				merged, mergeErr = manifest.MergeEnvIntoSources(env)
+				Expect(mergeErr).NotTo(HaveOccurred())
 			})
 
 			It("merged the environment extensions into sources", func() {
-				sources, _ := manifest.SourcesToComposeProject()
+				sources, err := manifest.SourcesToComposeProject()
+				Expect(err).NotTo(HaveOccurred())
 
-				srcSvc, _ := sources.GetService("db")
-				mergedSvc, _ := merged.GetService("db")
-				envSvc, _ := env.GetService("db")
+				srcSvc, err := sources.GetService("db")
+				Expect(err).NotTo(HaveOccurred())
+
+				mergedSvc, err := merged.GetService("db")
+				Expect(err).NotTo(HaveOccurred())
+
+				envSvc, err := env.GetService("db")
+				Expect(err).NotTo(HaveOccurred())
 
 				Expect(srcSvc.Extensions).To(HaveLen(1))
-				Expect(mergedSvc.Extensions).To(HaveLen(2))
+				Expect(mergedSvc.Extensions).To(HaveLen(3))
 				Expect(mergedSvc.Extensions["x-other-extension"]).To(Equal(envSvc.Extensions["x-other-extension"]))
 
 				mergedSvcAnExt := mergedSvc.Extensions["x-an-extension"].(map[string]interface{})
@@ -83,6 +93,11 @@ var _ = Describe("Manifest", func() {
 
 				Expect(mergedSvcAnExt["key"]).To(Equal("value"))
 				Expect(mergedSvcAnExt["override-key"]).To(Equal(envSvcAnExt["override-key"]))
+
+				k8sconf, err := config.ParseSvcK8sConfigFromMap(mergedSvc.Extensions)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sconf.Workload.LivenessProbe.Type).To(Equal(config.ProbeTypeExec.String()))
+				Expect(k8sconf.Workload.LivenessProbe.Exec.Command).To(Equal([]string{"echo", "I'm a useless check"}))
 			})
 
 			It("merged the environment env var overrides into sources", func() {
@@ -92,10 +107,10 @@ var _ = Describe("Manifest", func() {
 				Expect(mergedSvc.Environment["OVERRIDE_ME_WITH_VAL"]).To(Equal(envSvc.Environment["OVERRIDE_ME_WITH_VAL"]))
 			})
 
-			It("merged the environment volume labels into sources", func() {
+			It("merged the environment volume config into extensions", func() {
 				mergedVol := merged.Volumes["db_data"]
 				envVol, _ := env.GetVolume("db_data")
-				Expect(mergedVol.Labels).To(Equal(envVol.Labels))
+				Expect(mergedVol.Extensions).To(Equal(envVol.Extensions))
 			})
 
 			It("should not error", func() {
@@ -128,7 +143,7 @@ var _ = Describe("Manifest", func() {
 			})
 
 			It("returns environment file name template as expected", func() {
-				Expect(m.GetEnvironmentFileNameTemplate()).To(Equal("my-custom-docker-compose.kev.%s.yaml"))
+				Expect(m.GetEnvironmentFileNameTemplate()).To(Equal("my-custom-docker-compose.%s.%s.yaml"))
 			})
 		})
 
@@ -140,7 +155,7 @@ var _ = Describe("Manifest", func() {
 			})
 
 			It("returns environment file name template as expected", func() {
-				Expect(m.GetEnvironmentFileNameTemplate()).To(Equal("compose.kev.%s.yml"))
+				Expect(m.GetEnvironmentFileNameTemplate()).To(Equal("compose.%s.%s.yml"))
 			})
 		})
 	})

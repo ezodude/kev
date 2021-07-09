@@ -18,18 +18,15 @@ package kev
 
 import (
 	"encoding/json"
-	"errors"
 	"regexp"
 
 	"github.com/appvia/kev/pkg/kev/config"
-	"github.com/appvia/kev/pkg/kev/log"
 	composego "github.com/compose-spec/compose-go/types"
-	"github.com/xeipuuv/gojsonschema"
 )
 
 func newServiceConfig(s composego.ServiceConfig) (ServiceConfig, error) {
-	config := ServiceConfig{Name: s.Name, Labels: s.Labels, Environment: s.Environment, Extensions: s.Extensions}
-	return config, config.validate()
+	config := ServiceConfig{Name: s.Name, Environment: s.Environment, Extensions: s.Extensions}
+	return config, nil
 }
 
 // MarshalYAML makes Services implement yaml.Marshaller.
@@ -68,23 +65,6 @@ func (s Services) Set() map[string]bool {
 	return out
 }
 
-func (s Services) detectSecrets(matchers []map[string]string, detectedFn func()) bool {
-	var matches []secretHit
-	for _, svc := range s {
-		matches = append(matches, svc.detectSecretsInEnvVars(matchers)...)
-	}
-
-	if len(matches) == 0 {
-		return false
-	}
-
-	detectedFn()
-	for _, m := range matches {
-		log.Warnf("Service [%s], env var [%s] looks like a secret", m.svcName, m.envVar)
-	}
-	return true
-}
-
 func (sc ServiceConfig) detectSecretsInEnvVars(matchers []map[string]string) []secretHit {
 	var matches []secretHit
 
@@ -108,48 +88,4 @@ func (sc ServiceConfig) detectSecretsInEnvVars(matchers []map[string]string) []s
 	}
 
 	return matches
-}
-
-func (sc ServiceConfig) validate() error {
-	ls := gojsonschema.NewGoLoader(config.ServicesSchema)
-	ld := gojsonschema.NewGoLoader(sc.Labels)
-
-	result, err := gojsonschema.Validate(ls, ld)
-	if err != nil {
-		return err
-	}
-
-	if !result.Valid() {
-		return errors.New(result.Errors()[0].Description())
-	}
-	return nil
-}
-
-// GetLabels gets a service's labels
-func (sc ServiceConfig) GetLabels() map[string]string {
-	return sc.Labels
-}
-
-// minusEnvVars returns a copy of the ServiceConfig with blank env vars
-func (sc ServiceConfig) minusEnvVars() ServiceConfig {
-	return ServiceConfig{
-		Name:        sc.Name,
-		Labels:      sc.Labels,
-		Environment: map[string]*string{},
-	}
-}
-
-// condenseLabels returns a copy of the ServiceConfig with only condensed base service labels
-func (sc ServiceConfig) condenseLabels(labels []string) ServiceConfig {
-	for key := range sc.GetLabels() {
-		if !contains(labels, key) {
-			delete(sc.Labels, key)
-		}
-	}
-
-	return ServiceConfig{
-		Name:        sc.Name,
-		Labels:      sc.Labels,
-		Environment: sc.Environment,
-	}
 }

@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/appvia/kev/pkg/kev"
 	"github.com/spf13/cobra"
@@ -128,57 +127,37 @@ func init() {
 	rootCmd.AddCommand(devCmd)
 }
 
-func runDevCmd(cmd *cobra.Command, args []string) error {
-	skaffold, err := cmd.Flags().GetBool("skaffold")
-	namespace, err := cmd.Flags().GetString("namespace")
-	kubecontext, err := cmd.Flags().GetString("kubecontext")
-	kevenv, err := cmd.Flags().GetString("kev-env")
+func runDevCmd(cmd *cobra.Command, _ []string) error {
+	skaffold, _ := cmd.Flags().GetBool("skaffold")
+	namespace, _ := cmd.Flags().GetString("namespace")
+	kubecontext, _ := cmd.Flags().GetString("kubecontext")
+	kevenv, _ := cmd.Flags().GetString("kev-env")
 	tail, _ := cmd.Flags().GetBool("tail")
 	manualTrigger, _ := cmd.Flags().GetBool("manual-trigger")
 	verbose, _ := cmd.Root().Flags().GetBool("verbose")
 
-	if err != nil {
-		return err
+	eventHandler := func(e kev.RunnerEvent, r kev.Runner) error { return nil }
+
+	var envs []string
+	if len(kevenv) > 0 && skaffold {
+		// when in --skaffold mode - only watch, render and deploy a specified environment
+		envs = append(envs, kevenv)
 	}
 
-	displayDevModeStarted()
+	// The working directory is always the current directory.
+	// This ensures created manifest yaml entries are portable between users and require no path fixing.
+	wd := "."
 
-	preRunCmds := []kev.RunFunc{
-		func() error {
-			return runReconcileCmd(cmd, args)
-		},
-		func() error {
-			return runDetectSecretsCmd(cmd, args)
-		},
-		func() error {
-			return runRenderCmd(cmd, args)
-		},
-	}
-
-	errHandler := func(err error) error {
-		return displayError(err)
-	}
-
-	changeHandler := func(ch string) error {
-		return nil
-	}
-
-	workDir, err := os.Getwd()
-	if err != nil {
-		return errHandler(err)
-	}
-
-	opts := &kev.DevOptions{
-		Skaffold:      skaffold,
-		Namespace:     namespace,
-		Kubecontext:   kubecontext,
-		Kevenv:        kevenv,
-		Tail:          tail,
-		ManualTrigger: manualTrigger,
-		Verbose:       verbose,
-	}
-
-	kev.DisplaySkaffoldInfo(opts)
-
-	return kev.Dev(opts, workDir, preRunCmds, errHandler, changeHandler)
+	return kev.DevWithOptions(wd,
+		kev.WithAppName(rootCmd.Use),
+		kev.WithEventHandler(eventHandler),
+		kev.WithSkaffold(skaffold),
+		kev.WithK8sNamespace(namespace),
+		kev.WithKubecontext(kubecontext),
+		kev.WithSkaffoldTailEnabled(tail),
+		kev.WithSkaffoldManualTriggerEnabled(manualTrigger),
+		kev.WithSkaffoldVerboseEnabled(verbose),
+		kev.WithEnvs(envs),
+		kev.WithLogVerbose(verbose),
+	)
 }

@@ -21,6 +21,7 @@
 package kubernetes
 
 import (
+	"github.com/appvia/kev/pkg/kev/config"
 	composego "github.com/compose-spec/compose-go/types"
 )
 
@@ -28,7 +29,7 @@ import (
 type ConvertOptions struct {
 	ToStdout     bool     // Display output to STDOUT
 	CreateChart  bool     // Create K8s manifests as Chart
-	GenerateJSON bool     // Ganerate outcome as JSON. By defaults YAML gets generated.
+	GenerateJSON bool     // Generate outcome as JSON. By defaults YAML gets generated.
 	EmptyVols    bool     // Treat all referenced volumes as Empty volumes
 	Volumes      string   // Volumes to be generated ("persistentVolumeClaim"|"emptyDir"|"hostPath"|"configMap") (default "persistentVolumeClaim")
 	InputFiles   []string // Compose files to be processed
@@ -52,4 +53,7 @@ type Volumes struct {
 }
 
 // ProjectService is a wrapper type around composego.ServiceConfig
-type ProjectService composego.ServiceConfig
+type ProjectService struct {
+	composego.ServiceConfig
+	SvcK8sConfig config.SvcK8sConfig
+}

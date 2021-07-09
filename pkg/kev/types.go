@@ -17,10 +17,81 @@
 package kev
 
 import (
+	"context"
 	"io"
 
+	kmd "github.com/appvia/komando"
 	composego "github.com/compose-spec/compose-go/types"
 )
+
+// runConfig stores configuration for a command
+type runConfig struct {
+	ComposeSources        []string
+	Envs                  []string
+	ManifestFormat        string
+	ManifestsAsSingleFile bool
+	OutputDir             string
+	K8sNamespace          string
+	Kubecontext           string
+	Skaffold              bool
+	SkaffoldTail          bool
+	SkaffoldManualTrigger bool
+	SkaffoldVerbose       bool
+	// ExcludeServicesByEnv is used to exclude an environment's set of services from processing.
+	// Primary use is during render.
+	ExcludeServicesByEnv map[string][]string
+	// LogVerbose enables/disables verbose logging at a debug log level.
+	LogVerbose bool
+}
+
+// Options helps configure running project commands
+type Options func(project *Project, cfg *runConfig)
+
+// RunnerEvent a runner event.
+// This could be a pre/post runner step hook or a general significant event.
+// E.g.
+// - Pre step event: PreLoadProject
+// - post step event: PostLoadProject
+// - significant event: SecretsDetected
+type RunnerEvent uint
+
+// EventHandler is a callback function that handles a runner event
+type EventHandler func(RunnerEvent, Runner) error
+
+// Runner an interface used by the EventHandler
+type Runner interface {
+	Manifest() *Manifest
+	GetUI() kmd.UI
+	GetConfig() runConfig
+	SetConfig(opts ...Options)
+}
+
+// Project is the base struct for all runners.
+// Runners must initialise a project using Init().
+type Project struct {
+	AppName      string
+	WorkingDir   string
+	UI           kmd.UI
+	manifest     *Manifest
+	config       *runConfig
+	eventHandler EventHandler
+	ctx          context.Context
+}
+
+// InitRunner runs the required sequences to initialise a project.
+type InitRunner struct {
+	*Project
+}
+
+// RenderRunner runs the required sequences to render a project.
+type RenderRunner struct {
+	*Project
+}
+
+// DevRunner runs the required sequences to use dev with a project.
+type DevRunner struct {
+	*Project
+}
 
 // Manifest contains the tracked project's docker-compose sources and deployment environments
 type Manifest struct {
@@ -28,6 +99,7 @@ type Manifest struct {
 	Sources      *Sources     `yaml:"compose,omitempty" json:"compose,omitempty"`
 	Environments Environments `yaml:"environments,omitempty" json:"environments,omitempty"`
 	Skaffold     string       `yaml:"skaffold,omitempty" json:"skaffold,omitempty"`
+	UI           kmd.UI       `yaml:"-" json:"-"`
 }
 
 // Sources tracks a project's docker-compose sources
@@ -46,12 +118,13 @@ type Environment struct {
 	override *composeOverride
 }
 
-// composeOverride augments a compose project with labels and env vars to produce
+// composeOverride augments a compose project with an extension and env vars to produce
 // k8s deployment config
 type composeOverride struct {
 	Version  string   `yaml:"version,omitempty" json:"version,omitempty" diff:"version"`
 	Services Services `json:"services" diff:"services"`
 	Volumes  Volumes  `yaml:",omitempty" json:"volumes,omitempty" diff:"volumes"`
+	UI       kmd.UI   `yaml:"-" json:"-"`
 }
 
 // ComposeProject wrapper around a compose-go Project. It also provides the original
@@ -64,7 +137,6 @@ type ComposeProject struct {
 // ServiceConfig is a shallow version of a compose-go ServiceConfig
 type ServiceConfig struct {
 	Name        string                      `yaml:"-" json:"-" diff:"name"`
-	Labels      composego.Labels            `yaml:",omitempty" json:"labels,omitempty" diff:"labels"`
 	Environment composego.MappingWithEquals `yaml:",omitempty" json:"environment,omitempty" diff:"environment"`
 	Extensions  map[string]interface{}      `yaml:",inline" json:"-"`
 }
@@ -83,8 +155,8 @@ type Volumes map[string]VolumeConfig
 
 // VolumeConfig is a shallow version of a compose-go VolumeConfig
 type VolumeConfig struct {
-	Name   string           `yaml:",omitempty" json:"name,omitempty" diff:"name"`
-	Labels composego.Labels `yaml:",omitempty" json:"labels,omitempty" diff:"labels"`
+	Name       string                 `yaml:",omitempty" json:"name,omitempty" diff:"name"`
+	Extensions map[string]interface{} `yaml:",inline" json:"-"`
 }
 
 // changeset tracks changes made to a version, services and volumes
@@ -104,33 +176,6 @@ type change struct {
 	Index  interface{}
 }
 
-// ErrorHandler is a callback function that handles error and returns error
-type ErrorHandler func(error) error
-
-// ChangeHandler is a callback function that handles change and returns error, e.g. change event when in dev mode
-type ChangeHandler func(string) error
-
-// RunFunc is a callback function expected to run before/after the current command
-type RunFunc func() error
-
-// InitOptions contains parameters required to initialise a kev project
-type InitOptions struct {
-	ComposeSources []string
-	Envs           []string
-	Skaffold       bool
-}
-
-// DevOptions contains parameters required for Dev loop
-type DevOptions struct {
-	Skaffold      bool
-	Namespace     string
-	Kubecontext   string
-	Kevenv        string
-	Tail          bool
-	ManualTrigger bool
-	Verbose       bool
-}
-
 // WritableResults is a collection of WritableResult
 type WritableResults []WritableResult
 
@@ -138,6 +183,4 @@ type WritableResults []WritableResult
 type WritableResult struct {
 	WriterTo io.WriterTo
 	FilePath string
-	Skipped  bool
-	Updated  bool
 }

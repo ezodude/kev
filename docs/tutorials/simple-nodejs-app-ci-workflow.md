@@ -3,11 +3,11 @@ weight: 14
 title: Kev CI workflow example with a simple Node.js App
 ---
 
-# CI workflow example with a simple Node.js app  
+# CI workflow example with a simple Node.js app
 
 This example walks through using Kev in a commit based CI pipeline.
 
-You will setup CircleCI to render, build, push and deploy to a remote staging environment. 
+You will setup CircleCI to render, build, push and deploy to a remote staging environment.
 
 We assume that you,
 - Use [`git`](https://git-scm.com/) for source control and can push to a remote Git repo.
@@ -51,8 +51,8 @@ users:
 
 Now encode the slimmed down `kube-config` file into base64.
 
-```shell script
-cat ~/path/to/remote/cluster/kube/config | base64
+```sh
+$ cat ~/path/to/remote/cluster/kube/config | base64
 ```
 
 Then create the following [CircleCI Project Environment Variables](https://circleci.com/docs/2.0/env-vars/#setting-an-environment-variable-in-a-project),
@@ -67,13 +67,13 @@ These allow us to push our app's image to a secure docker registry. Should that 
 
 ### config.yaml
 
-Here is the [CircleCI config file](../../examples/node-app/.circleci/config.yml). It will create a CI pipeline that is triggered by a commit to your Git repo.
+Here is the [CircleCI config file](../../examples/node-app/.circleci/config.yaml). It will create a CI pipeline that is triggered by a commit to your Git repo.
 
 It assumes the necessary **CircleCI Environment Variables have been setup**, and the target cluster has a `staging` namespace already setup.
 
 It also depends on the Kev staging environment that we will be creating shortly. Here's the relevant step that performs the actual deployment,
 
-> CircleCI Deploy step: render staging, use Skaffold to build, push and deploy your app to Kubernetes. 
+> CircleCI Deploy step: render staging, use Skaffold to build, push and deploy your app to Kubernetes.
 ```yaml
 ...
 ...
@@ -85,7 +85,7 @@ It also depends on the Kev staging environment that we will be creating shortly.
             ./bin/skaffold run --kubeconfig ${KUBE_CONFIG_STAGING_FILE} --kube-context ${KUBE_CONTEXT_STAGING} --profile staging-env --namespace staging
 ...
 ...
-``` 
+```
 
 ## Initialise project
 
@@ -96,22 +96,22 @@ To follow the tutorial, make a copy of the project directory (`./examples/node-a
 > * prepare the app for use with [Skaffold](https://skaffold.dev/).
 
 ```sh
-kev init -e staging --skaffold
+$ kev init -e staging --skaffold
 ```
 
 You will notice the staging environment configuration file has been created:
 
 > Added environment specific override files:
-```
-... 
-|- docker-compose.kev.staging.yaml      # staging env
+```sh
+...
+|- docker-compose.env.staging.yaml      # staging env
 ```
 
-Adjust your Kubernetes `staging` application parameters for each of the components as needed. This is done via Compose [labels](../../docs/reference/config-params.md).
+Adjust your Kubernetes `staging` application parameters for each of the components as needed. This is done via Compose [extensions](../../docs/reference/config-params.md).
 
 Also, you'll find that Kev has bootstrapped a Skaffold config file (`skaffold.yaml`). If a `skaffold.yaml` file previously existed, then the additional profiles will be added there.
 
-Our CI pipeline will be using this Skaffold config file to power builds, pushes and deployments.  
+Our CI pipeline will be using this Skaffold config file to power builds, pushes and deployments.
 
 ## Iterate on the application and commit
 
@@ -125,8 +125,8 @@ The commit will trigger the CI pipeline.
 
 After the `stage` job successfully finishes, inspect that the Node app is running in your remote cluster:
 
-> List Kubernetes application pods for the Node.js app:
 ```sh
+# List Kubernetes application pods for the Node.js app:
 $ kubectl --context <remote_cluster_context> -n staging get po
 
 NAME                   READY   STATUS    RESTARTS   AGE
@@ -135,4 +135,4 @@ app-69d87ffbc8-wgs6   1/1     Running   0          9s
 
 That's it! If you have an [Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/) configured then navigate to the correct Url.
 
-Alternatively, you can choose to [port-forward](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/) the service and test the app on your localhost. 
+Alternatively, you can choose to [port-forward](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/) the service and test the app on your localhost.

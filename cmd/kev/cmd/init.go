@@ -17,8 +17,6 @@
 package cmd
 
 import (
-	"os"
-
 	"github.com/appvia/kev/pkg/kev"
 	"github.com/spf13/cobra"
 )
@@ -27,7 +25,7 @@ var initLongDesc = `Tracks compose sources & creates deployment environments.
 
 Examples:
 
-  ### Initialise kev.yaml with root docker-compose.yml and override file tracking. Adds a sandbox dev deployment environment.
+  ### Initialise the project with root docker-compose.yml and override file tracking. Adds a sandbox dev deployment environment.
   $ kev init
 
   ### Use an alternate docker-compose.yml file.
@@ -50,10 +48,6 @@ var initCmd = &cobra.Command{
 	Short: "Tracks compose sources & creates deployment environments.",
 	Long:  initLongDesc,
 	RunE:  runInitCmd,
-	PostRunE: func(cmd *cobra.Command, args []string) error {
-		os.Stdout.Write([]byte("\n"))
-		return runDetectSecretsCmd(cmd, args)
-	},
 }
 
 func init() {
@@ -80,33 +74,19 @@ func init() {
 }
 
 func runInitCmd(cmd *cobra.Command, _ []string) error {
-	cmdName := "Init"
-
 	files, _ := cmd.Flags().GetStringSlice("file")
 	envs, _ := cmd.Flags().GetStringSlice("environment")
 	skaffold, _ := cmd.Flags().GetBool("skaffold")
-
-	displayCmdStarted(cmdName)
-
-	opts := kev.InitOptions{
-		ComposeSources: files,
-		Envs:           envs,
-		Skaffold:       skaffold,
-	}
+	verbose, _ := cmd.Root().Flags().GetBool("verbose")
 
 	// The working directory is always the current directory.
 	// This ensures created manifest yaml entries are portable between users and require no path fixing.
 	wd := "."
-	results, err := kev.InitProjectWithOptions(wd, opts)
-	if err != nil {
-		return displayError(err)
-	}
-
-	if err := results.Write(); err != nil {
-		return err
-	}
-
-	displayInitSuccess(os.Stdout, results)
-
-	return nil
+	return kev.InitProjectWithOptions(wd,
+		kev.WithAppName(rootCmd.Use),
+		kev.WithComposeSources(files),
+		kev.WithEnvs(envs),
+		kev.WithSkaffold(skaffold),
+		kev.WithLogVerbose(verbose),
+	)
 }
